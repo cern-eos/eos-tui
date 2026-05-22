@@ -259,6 +259,8 @@ const (
 	IOShapingApps IOShapingMode = iota
 	IOShapingUsers
 	IOShapingGroups
+	IOShapingNodes
+	IOShapingPressure
 )
 
 type IOShapingRecord struct {
@@ -279,6 +281,34 @@ type IOShapingPolicyRecord struct {
 	LimitWriteBytesPerSec       float64
 	ReservationReadBytesPerSec  float64
 	ReservationWriteBytesPerSec float64
+}
+
+type IOShapingPressureRecord struct {
+	Type                              string
+	App                               string
+	NodeID                            string
+	NodeIOPressure                    float64
+	HasNodeIOPressure                 bool
+	ReadRateBps                       float64
+	WriteRateBps                      float64
+	GlobalReadRateBps                 float64
+	GlobalWriteRateBps                float64
+	ReservationReadBytesPerSec        float64
+	ReservationWriteBytesPerSec       float64
+	ReadReservationDeficitBps         float64
+	WriteReservationDeficitBps        float64
+	ReadPressureActive                bool
+	WritePressureActive               bool
+	ReadReservationDeficitActive      bool
+	WriteReservationDeficitActive     bool
+	ReadTriggersCompetitorThrottling  bool
+	WriteTriggersCompetitorThrottling bool
+	NodeHasPressuredReadReservation   bool
+	NodeHasPressuredWriteReservation  bool
+}
+
+type IOShapingConfig struct {
+	LimitsEnabled bool
 }
 
 type IOShapingPolicyUpdate struct {

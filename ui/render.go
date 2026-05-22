@@ -98,7 +98,7 @@ func (m model) renderFooter() string {
 			keys = "tab/0-9  •  ↑↓/jk  •  enter open  •  r refresh  •  L commands  •  q quit"
 		}
 	case viewIOShaping:
-		keys = "tab/0-9  •  ↑↓/jk  •  a apps  •  u users  •  g groups  •  n new  •  enter edit  •  d del  •  r  •  L commands"
+		keys = "tab/0-9  •  ↑↓/jk  •  a/u/g/n/p mode  •  m limits  •  N new  •  enter edit  •  d del  •  r  •  L commands"
 	case viewGroups:
 		keys = "tab/0-9  •  ↑↓/jk  •  ←→  •  S  •  /  •  enter status  •  A all status  •  r  •  L commands"
 	case viewVID:

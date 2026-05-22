@@ -560,51 +560,80 @@ func (m model) updateSpaceStatusKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) updateIOShapingKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	half := max(1, m.height/6)
-	n := len(m.ioShapingMergedRows())
+	rowCount := len(m.ioShapingMergedRows())
+	if m.ioShapingMode == eos.IOShapingPressure {
+		rowCount = len(m.ioShapingPressure)
+	}
 	switch msg.String() {
 	case "a":
 		if m.ioShapingMode != eos.IOShapingApps {
 			m.ioShapingMode = eos.IOShapingApps
 			m.ioShapingSelected = 0
 			m.ioShapingLoading = true
-			return m, tea.Batch(loadIOShapingCmd(m.client, m.ioShapingMode), loadIOShapingPoliciesCmd(m.client))
+			return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
 		}
 	case "u":
 		if m.ioShapingMode != eos.IOShapingUsers {
 			m.ioShapingMode = eos.IOShapingUsers
 			m.ioShapingSelected = 0
 			m.ioShapingLoading = true
-			return m, tea.Batch(loadIOShapingCmd(m.client, m.ioShapingMode), loadIOShapingPoliciesCmd(m.client))
+			return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
 		}
 	case "g":
 		if m.ioShapingMode != eos.IOShapingGroups {
 			m.ioShapingMode = eos.IOShapingGroups
 			m.ioShapingSelected = 0
 			m.ioShapingLoading = true
-			return m, tea.Batch(loadIOShapingCmd(m.client, m.ioShapingMode), loadIOShapingPoliciesCmd(m.client))
+			return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
 		}
 	case "n":
+		if m.ioShapingMode != eos.IOShapingNodes {
+			m.ioShapingMode = eos.IOShapingNodes
+			m.ioShapingSelected = 0
+			m.ioShapingLoading = true
+			return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
+		}
+	case "p":
+		if m.ioShapingMode != eos.IOShapingPressure {
+			m.ioShapingMode = eos.IOShapingPressure
+			m.ioShapingSelected = 0
+			m.ioShapingLoading = true
+			return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
+		}
+	case "N":
 		return m.startIOShapingPolicyCreate()
+	case "m":
+		if !m.ioShapingConfigLoaded {
+			m.status = "Loading IO shaping controller limits state..."
+			return m, loadIOShapingConfigCmd(m.client)
+		}
+		nextEnabled := !m.ioShapingConfig.LimitsEnabled
+		if nextEnabled {
+			m.status = "Enabling IO shaping controller limits..."
+		} else {
+			m.status = "Disabling IO shaping controller limits..."
+		}
+		return m, runIOShapingLimitsToggleCmd(m.client, nextEnabled)
 	case "up", "k":
 		if m.ioShapingSelected > 0 {
 			m.ioShapingSelected--
 		}
 	case "down", "j":
-		if m.ioShapingSelected < n-1 {
+		if m.ioShapingSelected < rowCount-1 {
 			m.ioShapingSelected++
 		}
 	case "ctrl+u":
 		m.ioShapingSelected = max(0, m.ioShapingSelected-half)
 	case "ctrl+d":
-		m.ioShapingSelected = min(n-1, m.ioShapingSelected+half)
+		m.ioShapingSelected = min(rowCount-1, m.ioShapingSelected+half)
 	case "G":
-		m.ioShapingSelected = max(0, n-1)
+		m.ioShapingSelected = max(0, rowCount-1)
 	case "enter":
 		return m.startIOShapingPolicyEdit()
 	case "d":
 		return m.startIOShapingPolicyDeleteConfirm()
 	}
-	m.ioShapingSelected = clampIndex(m.ioShapingSelected, n)
+	m.ioShapingSelected = clampIndex(m.ioShapingSelected, rowCount)
 	return m, nil
 }
 

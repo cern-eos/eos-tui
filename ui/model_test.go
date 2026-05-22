@@ -380,7 +380,13 @@ func TestIOShapingFooterShowsNewHotkey(t *testing.T) {
 	m.activeView = viewIOShaping
 
 	footer := m.renderFooter()
-	if !strings.Contains(footer, "n new") {
+	if !strings.Contains(footer, "m limits") {
+		t.Fatalf("expected IO shaping footer to advertise limits hotkey, got: %s", footer)
+	}
+	if !strings.Contains(footer, "a/u/g/n/p mode") {
+		t.Fatalf("expected IO shaping footer to advertise mode hotkeys, got: %s", footer)
+	}
+	if !strings.Contains(footer, "N new") {
 		t.Fatalf("expected IO shaping footer to advertise new-policy hotkey, got: %s", footer)
 	}
 }
@@ -2583,16 +2589,19 @@ func TestIOShapingMergedRowsIncludesPolicyOnly(t *testing.T) {
 
 	rows := m.ioShapingMergedRows()
 
-	if len(rows) != 3 {
-		t.Fatalf("expected 3 merged rows (traffic-only, both, policy-only), got %d", len(rows))
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 merged rows (total, traffic-only, both, policy-only), got %d", len(rows))
+	}
+	if !rows[0].total || rows[0].id != "[total apps]" {
+		t.Fatalf("expected first merged row to be total apps, got %+v", rows[0])
 	}
 
-	// Rows must be sorted alphabetically by id.
+	// Non-total rows must be sorted alphabetically by id.
 	ids := make([]string, len(rows))
 	for i, r := range rows {
 		ids[i] = r.id
 	}
-	for i := 1; i < len(ids); i++ {
+	for i := 2; i < len(ids); i++ {
 		if ids[i] < ids[i-1] {
 			t.Errorf("rows not sorted: %v", ids)
 			break
@@ -2626,7 +2635,7 @@ func TestIOShapingNavigationIncludesPolicyOnlyRows(t *testing.T) {
 	m.activeView = viewIOShaping
 	m.ioShapingMode = eos.IOShapingApps
 
-	// One traffic record, one policy-only record → merged count = 2.
+	// One traffic record, one policy-only record plus aggregate total row.
 	m.ioShaping = []eos.IOShapingRecord{
 		{ID: "app-a", Type: "app"},
 	}
@@ -2634,18 +2643,20 @@ func TestIOShapingNavigationIncludesPolicyOnlyRows(t *testing.T) {
 		{ID: "app-b", Type: "app", Enabled: true},
 	}
 
-	if got := len(m.ioShapingMergedRows()); got != 2 {
-		t.Fatalf("expected 2 merged rows, got %d", got)
+	if got := len(m.ioShapingMergedRows()); got != 3 {
+		t.Fatalf("expected 3 merged rows, got %d", got)
 	}
 
-	// Simulate pressing "down" from row 0 — should reach row 1 (policy-only).
+	// Simulate pressing "down" twice from total — should reach row 2 (policy-only).
 	m.ioShapingSelected = 0
 	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}
 	updated, _ := m.Update(msg)
 	m2 := updated.(model)
+	updated, _ = m2.Update(msg)
+	m2 = updated.(model)
 
-	if m2.ioShapingSelected != 1 {
-		t.Errorf("after pressing j, expected ioShapingSelected=1, got %d", m2.ioShapingSelected)
+	if m2.ioShapingSelected != 2 {
+		t.Errorf("after pressing j twice, expected ioShapingSelected=2, got %d", m2.ioShapingSelected)
 	}
 }
 
@@ -2665,6 +2676,7 @@ func TestIOShapingEnterOpensPolicyEditor(t *testing.T) {
 			ReservationWriteBytesPerSec: 4000,
 		},
 	}
+	m.ioShapingSelected = 1
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
@@ -2683,7 +2695,7 @@ func TestIOShapingEnterOpensPolicyEditor(t *testing.T) {
 	}
 }
 
-func TestIOShapingEditorPrefillsSelectedValueForEditing(t *testing.T) {
+func TestIOShapingEditorStartsNumericInputEmpty(t *testing.T) {
 	m := NewModel(nil, "local", "/").(model)
 	m.activeView = viewIOShaping
 	m.ioShapingMode = eos.IOShapingApps
@@ -2703,11 +2715,50 @@ func TestIOShapingEditorPrefillsSelectedValueForEditing(t *testing.T) {
 	if m.ioShapingEdit.stage != ioShapingEditStageInput {
 		t.Fatalf("expected io shaping editor to enter input stage, got %d", m.ioShapingEdit.stage)
 	}
-	if m.ioShapingEdit.input.Value() != "15000000" {
-		t.Fatalf("expected io shaping editor input to start from existing limit write, got %q", m.ioShapingEdit.input.Value())
+	if m.ioShapingEdit.input.Value() != "" {
+		t.Fatalf("expected io shaping editor input to start empty, got %q", m.ioShapingEdit.input.Value())
 	}
 	if cmd == nil {
 		t.Fatalf("expected focus command when entering io shaping input mode")
+	}
+}
+
+func TestIOShapingEditorEHotkeyTogglesEnabled(t *testing.T) {
+	m := NewModel(nil, "local", "/").(model)
+	m.activeView = viewIOShaping
+	m.ioShapingMode = eos.IOShapingApps
+	m.ioShapingPolicies = []eos.IOShapingPolicyRecord{
+		{ID: "test-app", Type: "app", Enabled: true},
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = updated.(model)
+
+	if m.ioShapingEdit.enabled {
+		t.Fatalf("expected e hotkey to toggle enabled off")
+	}
+}
+
+func TestIOShapingEditorYHotkeyApplies(t *testing.T) {
+	m := NewModel(&eos.Client{}, "local", "/").(model)
+	m.activeView = viewIOShaping
+	m.ioShapingMode = eos.IOShapingApps
+	m.ioShapingPolicies = []eos.IOShapingPolicyRecord{
+		{ID: "test-app", Type: "app", Enabled: true},
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = updated.(model)
+
+	if m.ioShapingEdit.active {
+		t.Fatalf("expected y hotkey to close editor while applying changes")
+	}
+	if cmd == nil {
+		t.Fatalf("expected y hotkey to return an io shaping policy update command")
 	}
 }
 
@@ -2838,6 +2889,7 @@ func TestIOShapingDeleteHotkeyWithoutPolicyShowsAlert(t *testing.T) {
 	m.activeView = viewIOShaping
 	m.ioShapingMode = eos.IOShapingApps
 	m.ioShaping = []eos.IOShapingRecord{{ID: "traffic-only", Type: "app"}}
+	m.ioShapingSelected = 1
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	m = updated.(model)
@@ -2855,7 +2907,7 @@ func TestIOShapingNewHotkeyOpensTargetEntry(t *testing.T) {
 	m.activeView = viewIOShaping
 	m.ioShapingMode = eos.IOShapingApps
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
 	m = updated.(model)
 
 	if !m.ioShapingEdit.active {
@@ -2874,7 +2926,7 @@ func TestIOShapingNewTargetEntryMovesToPolicyEditor(t *testing.T) {
 	m.activeView = viewIOShaping
 	m.ioShapingMode = eos.IOShapingApps
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
 	m = updated.(model)
 	for _, r := range "new-app" {
 		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
@@ -5227,11 +5279,108 @@ func TestIOShapingViewRendersWithData(t *testing.T) {
 		{ID: "app2", Type: "app", ReadBps: 3000, WriteBps: 4000},
 	}
 	body := m.renderIOShapingView(20)
+	if !strings.Contains(body, "[total apps]") {
+		t.Fatalf("expected IO shaping view to contain total apps row, got:\n%s", body)
+	}
+	if !strings.Contains(body, "4.00 KB/s") || !strings.Contains(body, "6.00 KB/s") {
+		t.Fatalf("expected IO shaping view to contain total rates, got:\n%s", body)
+	}
 	if !strings.Contains(body, "app1") {
 		t.Fatalf("expected IO shaping view to contain 'app1', got:\n%s", body)
 	}
 	if !strings.Contains(body, "app2") {
 		t.Fatalf("expected IO shaping view to contain 'app2', got:\n%s", body)
+	}
+}
+
+func TestIOShapingViewRendersNodeTotals(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := NewModel(nil, "test", "/").(model)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = updated.(model)
+	m.activeView = viewIOShaping
+	m.ioShapingMode = eos.IOShapingNodes
+	m.ioShaping = []eos.IOShapingRecord{
+		{ID: "node1:1095", Type: "node", ReadBps: 1000, WriteBps: 2000},
+		{ID: "node2:1095", Type: "node", ReadBps: 3000, WriteBps: 4000},
+	}
+	body := m.renderIOShapingView(20)
+	if !strings.Contains(body, "[total nodes]") {
+		t.Fatalf("expected node IO shaping view to contain total nodes row, got:\n%s", body)
+	}
+	if !strings.Contains(body, "node1:1095") || !strings.Contains(body, "node2:1095") {
+		t.Fatalf("expected node IO shaping view to contain nodes, got:\n%s", body)
+	}
+}
+
+func TestIOShapingPressureViewRendersData(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := NewModel(nil, "test", "/").(model)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 140, Height: 30})
+	m = updated.(model)
+	m.activeView = viewIOShaping
+	m.ioShapingMode = eos.IOShapingPressure
+	m.ioShapingPressure = []eos.IOShapingPressureRecord{
+		{
+			App:                           "bench",
+			NodeID:                        "node1:1095",
+			NodeIOPressure:                0.25,
+			ReadRateBps:                   1000,
+			WriteRateBps:                  2000,
+			ReservationWriteBytesPerSec:   50000000,
+			WriteReservationDeficitBps:    50000000,
+			WriteReservationDeficitActive: true,
+		},
+	}
+	body := m.renderIOShapingView(20)
+	for _, want := range []string{"bench", "node1:1095", "0.250", "write-def"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected pressure view to contain %q, got:\n%s", want, body)
+		}
+	}
+}
+
+func TestIOShapingMergedRowsPrependsTotal(t *testing.T) {
+	m := NewModel(nil, "test", "/").(model)
+	m.activeView = viewIOShaping
+	m.ioShapingMode = eos.IOShapingUsers
+	m.ioShaping = []eos.IOShapingRecord{
+		{ID: "2000", Type: "uid", ReadBps: 1000, WriteBps: 2000, ReadIOPS: 1, WriteIOPS: 2},
+		{ID: "1000", Type: "uid", ReadBps: 3000, WriteBps: 4000, ReadIOPS: 3, WriteIOPS: 4},
+	}
+
+	rows := m.ioShapingMergedRows()
+	if len(rows) != 3 {
+		t.Fatalf("expected total plus two rows, got %d", len(rows))
+	}
+	if !rows[0].total || rows[0].id != "[total users]" {
+		t.Fatalf("expected first row to be total users, got %+v", rows[0])
+	}
+	if rows[0].traffic == nil || rows[0].traffic.ReadBps != 4000 || rows[0].traffic.WriteBps != 6000 {
+		t.Fatalf("unexpected total traffic row: %+v", rows[0].traffic)
+	}
+	if rows[1].id != "1000" || rows[2].id != "2000" {
+		t.Fatalf("expected non-total rows to remain sorted, got %q then %q", rows[1].id, rows[2].id)
+	}
+}
+
+func TestIOShapingTotalRowIsReadOnly(t *testing.T) {
+	m := NewModel(nil, "test", "/").(model)
+	m.activeView = viewIOShaping
+	m.ioShaping = []eos.IOShapingRecord{{ID: "app1", Type: "app", ReadBps: 1000}}
+	m.ioShapingSelected = 0
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	if m.ioShapingEdit.active {
+		t.Fatalf("did not expect total row to open policy editor")
+	}
+	if cmd != nil {
+		t.Fatalf("did not expect total row edit to return command")
+	}
+	if !strings.Contains(m.status, "read-only") {
+		t.Fatalf("expected read-only status for total row, got %q", m.status)
 	}
 }
 
@@ -5589,6 +5738,89 @@ func TestIOShapingModeSwitchToGroups(t *testing.T) {
 	m = updated.(model)
 	if m.ioShapingMode != eos.IOShapingGroups {
 		t.Fatalf("expected ioShapingMode=IOShapingGroups after 'g', got %d", m.ioShapingMode)
+	}
+}
+
+func TestIOShapingModeSwitchToNodes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := NewModel(nil, "test", "/").(model)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = updated.(model)
+	m.activeView = viewIOShaping
+	m.ioShapingMode = eos.IOShapingApps
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = updated.(model)
+	if m.ioShapingMode != eos.IOShapingNodes {
+		t.Fatalf("expected ioShapingMode=IOShapingNodes after 'n', got %d", m.ioShapingMode)
+	}
+}
+
+func TestIOShapingModeSwitchToPressure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := NewModel(nil, "test", "/").(model)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = updated.(model)
+	m.activeView = viewIOShaping
+	m.ioShapingMode = eos.IOShapingApps
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m = updated.(model)
+	if m.ioShapingMode != eos.IOShapingPressure {
+		t.Fatalf("expected ioShapingMode=IOShapingPressure after 'p', got %d", m.ioShapingMode)
+	}
+}
+
+func TestIOShapingLimitsHotkeyLoadsConfigWhenUnknown(t *testing.T) {
+	m := NewModel(nil, "test", "/").(model)
+	m.activeView = viewIOShaping
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	m = updated.(model)
+
+	if !strings.Contains(m.status, "Loading IO shaping controller limits") {
+		t.Fatalf("expected loading status for unknown limits state, got %q", m.status)
+	}
+	if cmd == nil {
+		t.Fatalf("expected m hotkey to load IO shaping config when state is unknown")
+	}
+}
+
+func TestIOShapingLimitsHotkeyTogglesLoadedState(t *testing.T) {
+	m := NewModel(&eos.Client{}, "test", "/").(model)
+	m.activeView = viewIOShaping
+	m.ioShapingConfigLoaded = true
+	m.ioShapingConfig = eos.IOShapingConfig{LimitsEnabled: true}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	m = updated.(model)
+
+	if !strings.Contains(m.status, "Disabling IO shaping controller limits") {
+		t.Fatalf("expected disabling status, got %q", m.status)
+	}
+	if cmd == nil {
+		t.Fatalf("expected m hotkey to return limits toggle command")
+	}
+}
+
+func TestIOShapingLimitsToggleResultUpdatesState(t *testing.T) {
+	m := NewModel(nil, "test", "/").(model)
+	m.activeView = viewIOShaping
+
+	updated, cmd := m.Update(ioShapingLimitsToggleResultMsg{enabled: false})
+	m = updated.(model)
+
+	if !m.ioShapingConfigLoaded {
+		t.Fatalf("expected config to be marked loaded")
+	}
+	if m.ioShapingConfig.LimitsEnabled {
+		t.Fatalf("expected limits to be disabled after toggle result")
+	}
+	if !strings.Contains(m.status, "Disabled IO shaping controller limits") {
+		t.Fatalf("expected disabled status, got %q", m.status)
+	}
+	if cmd == nil {
+		t.Fatalf("expected toggle result to refresh IO shaping data")
 	}
 }
 

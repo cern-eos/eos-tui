@@ -114,7 +114,7 @@ func (m model) Init() tea.Cmd {
 	case viewGroups:
 		cmds = append(cmds, loadGroupsCmd(m.client))
 	case viewIOShaping:
-		cmds = append(cmds, loadIOShapingCmd(m.client, m.ioShapingMode), loadIOShapingPoliciesCmd(m.client), ioShapingTickCmd(), ioShapingPolicyTickCmd())
+		cmds = append(cmds, loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode), ioShapingTickCmd(), ioShapingPolicyTickCmd())
 	case viewVID:
 		cmds = append(cmds, loadVIDCmd(m.client, m.vidMode))
 	case viewAccess:
@@ -679,18 +679,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			delayedReloadMGMVersionsCmd(m.client, qdbCoupRefreshDelay),
 		)
 	case ioShapingLoadedMsg:
+		if msg.mode != m.ioShapingMode {
+			return m, nil
+		}
 		m.ioShapingLoading = false
 		if msg.err != nil {
 			m.ioShapingErr = msg.err
-		} else if msg.mode == m.ioShapingMode {
+		} else {
 			m.ioShaping = msg.records
 			m.ioShapingErr = nil
 			m.ioShapingSelected = clampIndex(m.ioShapingSelected, len(m.ioShapingMergedRows()))
+		}
+	case ioShapingPressureLoadedMsg:
+		if msg.mode != m.ioShapingMode {
+			return m, nil
+		}
+		m.ioShapingLoading = false
+		if msg.err != nil {
+			m.ioShapingErr = msg.err
+		} else {
+			m.ioShapingPressure = msg.records
+			m.ioShapingErr = nil
+			m.ioShapingSelected = clampIndex(m.ioShapingSelected, len(m.ioShapingPressure))
 		}
 	case ioShapingPoliciesLoadedMsg:
 		if msg.err == nil {
 			m.ioShapingPolicies = msg.records
 			m.ioShapingSelected = clampIndex(m.ioShapingSelected, len(m.ioShapingMergedRows()))
+		}
+	case ioShapingConfigLoadedMsg:
+		m.ioShapingConfigErr = msg.err
+		if msg.err == nil {
+			m.ioShapingConfig = msg.config
+			m.ioShapingConfigLoaded = true
 		}
 	case ioShapingPolicyResultMsg:
 		if msg.err != nil {
@@ -705,17 +726,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = fmt.Sprintf("Updated IO shaping policy for %s", msg.id)
 		}
-		return m, tea.Batch(loadIOShapingCmd(m.client, m.ioShapingMode), loadIOShapingPoliciesCmd(m.client))
+		return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
+	case ioShapingLimitsToggleResultMsg:
+		if msg.err != nil {
+			m.alert = errorAlert{
+				active:  true,
+				message: fmt.Sprintf("io shaping controller limits toggle failed: %v", msg.err),
+			}
+			return m, loadIOShapingConfigCmd(m.client)
+		}
+		m.ioShapingConfig.LimitsEnabled = msg.enabled
+		m.ioShapingConfigLoaded = true
+		if msg.enabled {
+			m.status = "Enabled IO shaping controller limits"
+		} else {
+			m.status = "Disabled IO shaping controller limits"
+		}
+		return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
 	case ioShapingTickMsg:
 		if m.activeView == viewIOShaping && !m.ioShapingLoading {
 			m.ioShapingLoading = true
-			return m, tea.Batch(loadIOShapingCmd(m.client, m.ioShapingMode), ioShapingTickCmd())
+			return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), ioShapingTickCmd())
 		} else if m.activeView == viewIOShaping {
 			return m, ioShapingTickCmd()
 		}
 	case ioShapingPolicyTickMsg:
 		if m.activeView == viewIOShaping {
-			return m, tea.Batch(loadIOShapingPoliciesCmd(m.client), ioShapingPolicyTickCmd())
+			return m, tea.Batch(loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode), ioShapingPolicyTickCmd())
 		}
 	case eosCheckResultMsg:
 		if msg.err != nil {
@@ -974,7 +1011,7 @@ func (m model) onViewChanged() (tea.Model, tea.Cmd) {
 	case viewIOShaping:
 		m.ioShapingLoading = true
 		m.ioShapingErr = nil
-		return m, tea.Batch(loadIOShapingCmd(m.client, m.ioShapingMode), ioShapingTickCmd(), loadIOShapingPoliciesCmd(m.client), ioShapingPolicyTickCmd())
+		return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), ioShapingTickCmd(), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode), ioShapingPolicyTickCmd())
 	default:
 		return m, nil
 	}
@@ -1022,7 +1059,7 @@ func (m model) refreshActiveView() (tea.Model, tea.Cmd) {
 		m.ioShapingLoading = true
 		m.ioShapingErr = nil
 		m.status = "Refreshing IO shaping..."
-		return m, tea.Batch(loadIOShapingCmd(m.client, m.ioShapingMode), loadIOShapingPoliciesCmd(m.client))
+		return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
 	case viewVID:
 		m.vidLoading = true
 		m.vidErr = nil

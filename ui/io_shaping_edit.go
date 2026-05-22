@@ -99,8 +99,16 @@ func (m model) ioShapingPolicyEditForTarget(targetID string, createMode bool) io
 }
 
 func (m model) startIOShapingPolicyEdit() (tea.Model, tea.Cmd) {
+	if !ioShapingModeHasPolicies(m.ioShapingMode) {
+		m.status = "This IO shaping view is read-only"
+		return m, nil
+	}
 	row, ok := m.selectedIOShapingRow()
 	if !ok {
+		return m, nil
+	}
+	if row.total {
+		m.status = "The total IO shaping row is read-only"
 		return m, nil
 	}
 
@@ -109,6 +117,10 @@ func (m model) startIOShapingPolicyEdit() (tea.Model, tea.Cmd) {
 }
 
 func (m model) startIOShapingPolicyCreate() (tea.Model, tea.Cmd) {
+	if !ioShapingModeHasPolicies(m.ioShapingMode) {
+		m.status = "Switch to apps, users, or groups to create IO shaping policies"
+		return m, nil
+	}
 	input := newIOShapingEditInput(ioShapingTargetPrompt(m.ioShapingMode))
 	cmd := input.Focus()
 	m.ioShapingEdit = ioShapingPolicyEdit{
@@ -122,8 +134,16 @@ func (m model) startIOShapingPolicyCreate() (tea.Model, tea.Cmd) {
 }
 
 func (m model) startIOShapingPolicyDeleteConfirm() (tea.Model, tea.Cmd) {
+	if !ioShapingModeHasPolicies(m.ioShapingMode) {
+		m.status = "This IO shaping view is read-only"
+		return m, nil
+	}
 	row, ok := m.selectedIOShapingRow()
 	if !ok || row.policy == nil {
+		if ok && row.total {
+			m.status = "The total IO shaping row is read-only"
+			return m, nil
+		}
 		m.alert = errorAlert{
 			active:  true,
 			message: "No IO shaping policy is configured for the selected row.",
@@ -187,6 +207,12 @@ func (m model) updateIOShapingPolicyEditKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd
 			m.ioShapingEdit.stage = ioShapingEditStageDeleteConfirm
 			m.ioShapingEdit.button = buttonCancel
 			return m, nil
+		case "e":
+			m.ioShapingEdit.enabled = !m.ioShapingEdit.enabled
+			m.ioShapingEdit.err = ""
+			return m, nil
+		case "y":
+			return m.applyIOShapingPolicyEdit()
 		case "up", "k":
 			if m.ioShapingEdit.selected > ioShapingEditFieldEnabled {
 				m.ioShapingEdit.selected--
@@ -203,18 +229,10 @@ func (m model) updateIOShapingPolicyEditKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd
 				return m, nil
 			case ioShapingEditFieldLimitRead, ioShapingEditFieldLimitWrite, ioShapingEditFieldReservationRead, ioShapingEditFieldReservationWrite:
 				m.ioShapingEdit.stage = ioShapingEditStageInput
-				m.ioShapingEdit.input.SetValue(m.ioShapingEdit.valueForField(m.ioShapingEdit.selected))
+				m.ioShapingEdit.input.SetValue("")
 				return m, m.ioShapingEdit.input.Focus()
 			case ioShapingEditFieldApply:
-				update, err := m.ioShapingEdit.policyUpdate()
-				if err != nil {
-					m.ioShapingEdit.err = err.Error()
-					return m, nil
-				}
-				m.ioShapingEdit.active = false
-				m.ioShapingLoading = true
-				m.status = fmt.Sprintf("Updating IO shaping policy for %s", update.ID)
-				return m, runIOShapingPolicySetCmd(m.client, update)
+				return m.applyIOShapingPolicyEdit()
 			}
 		}
 	case ioShapingEditStageDeleteConfirm:
@@ -271,6 +289,18 @@ func (m model) updateIOShapingPolicyEditKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	}
 
 	return m, nil
+}
+
+func (m model) applyIOShapingPolicyEdit() (tea.Model, tea.Cmd) {
+	update, err := m.ioShapingEdit.policyUpdate()
+	if err != nil {
+		m.ioShapingEdit.err = err.Error()
+		return m, nil
+	}
+	m.ioShapingEdit.active = false
+	m.ioShapingLoading = true
+	m.status = fmt.Sprintf("Updating IO shaping policy for %s", update.ID)
+	return m, runIOShapingPolicySetCmd(m.client, update)
 }
 
 func (edit ioShapingPolicyEdit) policyUpdate() (eos.IOShapingPolicyUpdate, error) {
@@ -411,7 +441,7 @@ func (m model) renderIOShapingPolicyEditPopup() string {
 			m.styles.status.Render("g cancel  •  G delete  •  enter confirm  •  esc close"),
 		}
 	} else {
-		lines = append(lines, "", m.styles.status.Render("↑↓ select  •  g/G home/end  •  enter edit/toggle/apply  •  d delete  •  esc cancel"))
+		lines = append(lines, "", m.styles.status.Render("↑↓ select  •  e toggle enabled  •  y apply  •  enter edit/toggle/apply  •  d delete  •  esc cancel"))
 	}
 	if m.ioShapingEdit.stage != ioShapingEditStageDeleteConfirm {
 		lines = append(lines, m.styles.status.Render("values accept raw bytes/s or KB/MB/GB suffixes"))

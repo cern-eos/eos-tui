@@ -206,15 +206,31 @@ type ioShapingLoadedMsg struct {
 	err     error
 }
 
+type ioShapingPressureLoadedMsg struct {
+	records []eos.IOShapingPressureRecord
+	mode    eos.IOShapingMode
+	err     error
+}
+
 type ioShapingPoliciesLoadedMsg struct {
 	records []eos.IOShapingPolicyRecord
 	err     error
+}
+
+type ioShapingConfigLoadedMsg struct {
+	config eos.IOShapingConfig
+	err    error
 }
 
 type ioShapingPolicyResultMsg struct {
 	id  string
 	op  string
 	err error
+}
+
+type ioShapingLimitsToggleResultMsg struct {
+	enabled bool
+	err     error
 }
 
 type eosVersionLoadedMsg struct {
@@ -841,13 +857,17 @@ type model struct {
 	spaceStatusSelected int
 	spaceStatusTarget   string
 
-	ioShaping         []eos.IOShapingRecord
-	ioShapingPolicies []eos.IOShapingPolicyRecord
-	ioShapingMode     eos.IOShapingMode
-	ioShapingLoading  bool
-	ioShapingErr      error
-	ioShapingSelected int
-	ioShapingEdit     ioShapingPolicyEdit
+	ioShaping             []eos.IOShapingRecord
+	ioShapingPressure     []eos.IOShapingPressureRecord
+	ioShapingPolicies     []eos.IOShapingPolicyRecord
+	ioShapingConfig       eos.IOShapingConfig
+	ioShapingMode         eos.IOShapingMode
+	ioShapingLoading      bool
+	ioShapingErr          error
+	ioShapingConfigLoaded bool
+	ioShapingConfigErr    error
+	ioShapingSelected     int
+	ioShapingEdit         ioShapingPolicyEdit
 
 	status string
 
@@ -875,6 +895,7 @@ type model struct {
 
 type ioShapingMergedRow struct {
 	id      string
+	total   bool
 	traffic *eos.IOShapingRecord
 	policy  *eos.IOShapingPolicyRecord
 }
