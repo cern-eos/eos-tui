@@ -1347,6 +1347,119 @@ func TestIOShapingPolicySetArgsForGroupDisable(t *testing.T) {
 	}
 }
 
+func TestIOShapingNodesUsesNodesFlag(t *testing.T) {
+	runner := &recordingRunner{out: []byte(`[{"id":"node1","type":"node","window_sec":5,"read_rate_bps":1000,"write_rate_bps":2000,"read_iops":3,"write_iops":4}]`)}
+	client := &Client{timeout: time.Minute, runner: runner}
+
+	records, err := client.IOShaping(context.Background(), IOShapingNodes)
+	if err != nil {
+		t.Fatalf("IOShaping(nodes) error: %v", err)
+	}
+	if len(records) != 1 || records[0].ID != "node1" || records[0].ReadBps != 1000 {
+		t.Fatalf("unexpected node shaping records: %+v", records)
+	}
+	got := append([]string{runner.calls[0].name}, runner.calls[0].args...)
+	want := []string{"eos", "io", "shaping", "ls", "--nodes", "--json", "--window", "5"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("unexpected io shaping nodes args: got %v want %v", got, want)
+	}
+}
+
+func TestIOShapingPressureParsesRecords(t *testing.T) {
+	runner := &recordingRunner{out: []byte(`[{
+		"type":"app_node_pressure",
+		"app":"bench",
+		"node_id":"node1:1095",
+		"node_io_pressure":0.25,
+		"has_node_io_pressure":true,
+		"read_rate_bps":1000,
+		"write_rate_bps":2000,
+		"global_read_rate_bps":3000,
+		"global_write_rate_bps":4000,
+		"reservation_read_bytes_per_sec":5000,
+		"reservation_write_bytes_per_sec":6000,
+		"read_reservation_deficit_bps":7000,
+		"write_reservation_deficit_bps":8000,
+		"read_pressure_active":true,
+		"write_pressure_active":false,
+		"read_reservation_deficit_active":true,
+		"write_reservation_deficit_active":false,
+		"read_triggers_competitor_throttling":false,
+		"write_triggers_competitor_throttling":true,
+		"node_has_pressured_read_reservation":true,
+		"node_has_pressured_write_reservation":false
+	}]`)}
+	client := &Client{timeout: time.Minute, runner: runner}
+
+	records, err := client.IOShapingPressure(context.Background())
+	if err != nil {
+		t.Fatalf("IOShapingPressure() error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected one pressure record, got %d", len(records))
+	}
+	gotRecord := records[0]
+	if gotRecord.App != "bench" || gotRecord.NodeID != "node1:1095" || gotRecord.NodeIOPressure != 0.25 {
+		t.Fatalf("unexpected pressure record identity: %+v", gotRecord)
+	}
+	if !gotRecord.ReadPressureActive || !gotRecord.ReadReservationDeficitActive || !gotRecord.WriteTriggersCompetitorThrottling || !gotRecord.NodeHasPressuredReadReservation {
+		t.Fatalf("expected pressure booleans to parse, got %+v", gotRecord)
+	}
+	got := append([]string{runner.calls[0].name}, runner.calls[0].args...)
+	want := []string{"eos", "io", "shaping", "pressure", "ls", "--json"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("unexpected io shaping pressure args: got %v want %v", got, want)
+	}
+}
+
+func TestIOShapingConfigParsesLimitsEnabled(t *testing.T) {
+	runner := &recordingRunner{out: []byte(`{"limits_enabled":true}`)}
+	client := &Client{timeout: time.Minute, runner: runner}
+
+	config, err := client.IOShapingConfig(context.Background())
+	if err != nil {
+		t.Fatalf("IOShapingConfig() error: %v", err)
+	}
+	if !config.LimitsEnabled {
+		t.Fatalf("expected LimitsEnabled=true")
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected one command, got %d", len(runner.calls))
+	}
+	got := append([]string{runner.calls[0].name}, runner.calls[0].args...)
+	want := []string{"eos", "io", "shaping", "config", "ls", "--json"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("unexpected io shaping config args: got %v want %v", got, want)
+	}
+}
+
+func TestSetIOShapingLimitsEnabledArgs(t *testing.T) {
+	for _, tc := range []struct {
+		enabled bool
+		want    string
+	}{
+		{enabled: true, want: "enabled"},
+		{enabled: false, want: "disabled"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			runner := &recordingRunner{}
+			client := &Client{timeout: time.Minute, runner: runner}
+
+			if err := client.SetIOShapingLimitsEnabled(context.Background(), tc.enabled); err != nil {
+				t.Fatalf("SetIOShapingLimitsEnabled() error: %v", err)
+			}
+			if len(runner.calls) != 1 {
+				t.Fatalf("expected one command, got %d", len(runner.calls))
+			}
+			got := append([]string{runner.calls[0].name}, runner.calls[0].args...)
+			want := []string{"eos", "io", "shaping", "config", "set", "--limits", tc.want}
+			if strings.Join(got, "|") != strings.Join(want, "|") {
+				t.Fatalf("unexpected io shaping limits args: got %v want %v", got, want)
+			}
+		})
+	}
+}
+
 func TestGroupSetArgsForDrain(t *testing.T) {
 	got, err := groupSetArgs("default.1", "drain")
 	if err != nil {

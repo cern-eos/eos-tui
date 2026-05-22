@@ -206,6 +206,29 @@ func loadIOShapingCmd(client *eos.Client, mode eos.IOShapingMode) tea.Cmd {
 	}
 }
 
+func loadIOShapingPressureCmd(client *eos.Client) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		records, err := client.IOShapingPressure(ctx)
+		return ioShapingPressureLoadedMsg{records: records, mode: eos.IOShapingPressure, err: err}
+	}
+}
+
+func loadIOShapingViewCmd(client *eos.Client, mode eos.IOShapingMode) tea.Cmd {
+	if mode == eos.IOShapingPressure {
+		return loadIOShapingPressureCmd(client)
+	}
+	return loadIOShapingCmd(client, mode)
+}
+
+func loadIOShapingPolicyDataCmd(client *eos.Client, mode eos.IOShapingMode) tea.Cmd {
+	if !ioShapingModeHasPolicies(mode) {
+		return loadIOShapingConfigCmd(client)
+	}
+	return tea.Batch(loadIOShapingPoliciesCmd(client), loadIOShapingConfigCmd(client))
+}
+
 func loadIOShapingPoliciesCmd(client *eos.Client) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -215,10 +238,26 @@ func loadIOShapingPoliciesCmd(client *eos.Client) tea.Cmd {
 	}
 }
 
+func loadIOShapingConfigCmd(client *eos.Client) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		config, err := client.IOShapingConfig(ctx)
+		return ioShapingConfigLoadedMsg{config: config, err: err}
+	}
+}
+
 func runIOShapingPolicySetCmd(client *eos.Client, update eos.IOShapingPolicyUpdate) tea.Cmd {
 	return func() tea.Msg {
 		err := client.SetIOShapingPolicy(context.Background(), update)
 		return ioShapingPolicyResultMsg{id: update.ID, op: "updated", err: err}
+	}
+}
+
+func runIOShapingLimitsToggleCmd(client *eos.Client, enabled bool) tea.Cmd {
+	return func() tea.Msg {
+		err := client.SetIOShapingLimitsEnabled(context.Background(), enabled)
+		return ioShapingLimitsToggleResultMsg{enabled: enabled, err: err}
 	}
 }
 
