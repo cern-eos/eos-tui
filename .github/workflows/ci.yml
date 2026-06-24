@@ -122,7 +122,7 @@ jobs:
 
       - name: Cache EOS Docker image
         id: cache-eos-image
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: /tmp/eos-image.tar
           key: eos-docker-image-${{ inputs.eos_image_tag || '5.4.1.el9' }}
@@ -170,7 +170,7 @@ jobs:
       # -----------------------------------------------------------------------
 
       - name: Cache Helm chart
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/helm
           key: helm-eos-chart-${{ inputs.eos_image_tag || '5.4.1.el9' }}
