@@ -2,7 +2,6 @@ package eos
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,74 +14,116 @@ func (c *Client) NamespaceStats(ctx context.Context) (NamespaceStats, error) {
 		return NamespaceStats{}, fmt.Errorf("eos ns stat: %w", err)
 	}
 
+	return parseNamespaceStats(output)
+}
+
+// parseNamespaceStats merges the sparse rows emitted by `eos -j ns stat`.
+//
+// EOS emits one metric per result row on current releases rather than a
+// single fully-populated object. Pointer fields are intentional: zero is a
+// valid metric value, so presence must be distinguished from an omitted
+// field to avoid a later sparse row erasing a value parsed earlier.
+func parseNamespaceStats(output []byte) (NamespaceStats, error) {
 	var payload struct {
 		Result []struct {
-			Master string `json:"master_id"`
+			Master *string `json:"master_id"`
 			NS     struct {
 				Total struct {
 					Files       any `json:"files"`
 					Directories any `json:"directories"`
 				} `json:"total"`
 				Current struct {
-					FID uint64 `json:"fid"`
-					CID uint64 `json:"cid"`
+					FID *uint64 `json:"fid"`
+					CID *uint64 `json:"cid"`
 				} `json:"current"`
 				Generated struct {
-					FID uint64 `json:"fid"`
-					CID uint64 `json:"cid"`
+					FID *uint64 `json:"fid"`
+					CID *uint64 `json:"cid"`
 				} `json:"generated"`
 				Contention struct {
-					Read  float64 `json:"read"`
-					Write float64 `json:"write"`
+					Read  *float64 `json:"read"`
+					Write *float64 `json:"write"`
 				} `json:"contention"`
 				Cache struct {
 					Files struct {
-						MaxSize   uint64 `json:"maxsize"`
-						Occupancy uint64 `json:"occupancy"`
-						Requests  uint64 `json:"requests"`
-						Hits      uint64 `json:"hits"`
+						MaxSize   *uint64 `json:"maxsize"`
+						Occupancy *uint64 `json:"occupancy"`
+						Requests  *uint64 `json:"requests"`
+						Hits      *uint64 `json:"hits"`
 					} `json:"files"`
 					Containers struct {
-						MaxSize   uint64 `json:"maxsize"`
-						Occupancy uint64 `json:"occupancy"`
-						Requests  uint64 `json:"requests"`
-						Hits      uint64 `json:"hits"`
+						MaxSize   *uint64 `json:"maxsize"`
+						Occupancy *uint64 `json:"occupancy"`
+						Requests  *uint64 `json:"requests"`
+						Hits      *uint64 `json:"hits"`
 					} `json:"containers"`
 				} `json:"cache"`
 			} `json:"ns"`
 		} `json:"result"`
 	}
 
-	if err := json.Unmarshal(stripEOSPreamble(output), &payload); err != nil {
+	if err := unmarshalEOSJSON(output, &payload); err != nil {
 		return NamespaceStats{}, fmt.Errorf("parse ns stat: %w (output: %.200s)", err, output)
 	}
 
 	stats := NamespaceStats{}
 	for _, item := range payload.Result {
-		stats.MasterHost = item.Master
-		if val := toUint64(item.NS.Total.Files); val > 0 {
+		if item.Master != nil {
+			stats.MasterHost = *item.Master
+		}
+		if val, ok := numericUint64(item.NS.Total.Files); ok {
 			stats.TotalFiles = val
 		}
-		if val := toUint64(item.NS.Total.Directories); val > 0 {
+		if val, ok := numericUint64(item.NS.Total.Directories); ok {
 			stats.TotalDirectories = val
 		}
-		stats.CurrentFID = item.NS.Current.FID
-		stats.CurrentCID = item.NS.Current.CID
-		stats.GeneratedFID = item.NS.Generated.FID
-		stats.GeneratedCID = item.NS.Generated.CID
-		stats.ContentionRead = item.NS.Contention.Read
-		stats.ContentionWrite = item.NS.Contention.Write
-		stats.CacheFilesMax = item.NS.Cache.Files.MaxSize
-		stats.CacheFilesOccup = item.NS.Cache.Files.Occupancy
-		stats.CacheFilesRequests = item.NS.Cache.Files.Requests
-		stats.CacheFilesHits = item.NS.Cache.Files.Hits
-		stats.CacheContainersMax = item.NS.Cache.Containers.MaxSize
-		stats.CacheContainersOccup = item.NS.Cache.Containers.Occupancy
-		stats.CacheContainersRequests = item.NS.Cache.Containers.Requests
-		stats.CacheContainersHits = item.NS.Cache.Containers.Hits
+		assignIfPresent(&stats.CurrentFID, item.NS.Current.FID)
+		assignIfPresent(&stats.CurrentCID, item.NS.Current.CID)
+		assignIfPresent(&stats.GeneratedFID, item.NS.Generated.FID)
+		assignIfPresent(&stats.GeneratedCID, item.NS.Generated.CID)
+		assignIfPresent(&stats.ContentionRead, item.NS.Contention.Read)
+		assignIfPresent(&stats.ContentionWrite, item.NS.Contention.Write)
+		assignIfPresent(&stats.CacheFilesMax, item.NS.Cache.Files.MaxSize)
+		assignIfPresent(&stats.CacheFilesOccup, item.NS.Cache.Files.Occupancy)
+		assignIfPresent(&stats.CacheFilesRequests, item.NS.Cache.Files.Requests)
+		assignIfPresent(&stats.CacheFilesHits, item.NS.Cache.Files.Hits)
+		assignIfPresent(&stats.CacheContainersMax, item.NS.Cache.Containers.MaxSize)
+		assignIfPresent(&stats.CacheContainersOccup, item.NS.Cache.Containers.Occupancy)
+		assignIfPresent(&stats.CacheContainersRequests, item.NS.Cache.Containers.Requests)
+		assignIfPresent(&stats.CacheContainersHits, item.NS.Cache.Containers.Hits)
 	}
 
 	return stats, nil
+}
+
+func numericUint64(value any) (uint64, bool) {
+	switch value := value.(type) {
+	case float64:
+		if value < 0 {
+			return 0, false
+		}
+		return uint64(value), true
+	case uint64:
+		return value, true
+	case int64:
+		if value < 0 {
+			return 0, false
+		}
+		return uint64(value), true
+	case int:
+		if value < 0 {
+			return 0, false
+		}
+		return uint64(value), true
+	default:
+		return 0, false
+	}
+}
+
+func assignIfPresent[T any](dst *T, src *T) {
+	if src != nil {
+		*dst = *src
+	}
 }
 
 func (c *Client) ListPath(ctx context.Context, rawPath string) (Directory, error) {
@@ -173,7 +214,7 @@ func (c *Client) fetchCLIFileInfo(ctx context.Context, rawPath string) (cliFileI
 	}
 
 	var info cliFileInfo
-	if err := json.Unmarshal(stripEOSPreamble(output), &info); err != nil {
+	if err := unmarshalEOSJSON(output, &info); err != nil {
 		return cliFileInfo{}, fmt.Errorf("parse fileinfo: %w (output: %.200s)", err, output)
 	}
 

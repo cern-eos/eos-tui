@@ -2,7 +2,6 @@ package eos
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -49,6 +48,15 @@ func looksPressureUnsupported(err error, output []byte) bool {
 	return !strings.Contains(text, "pressure ls") && !strings.Contains(text, "io shaping pressure")
 }
 
+func ioShapingRuntimeMismatch(output []byte) string {
+	text := strings.TrimSpace(string(output))
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "symbol lookup error") || strings.Contains(lower, "undefined symbol") {
+		return text
+	}
+	return ""
+}
+
 func (c *Client) IOShaping(ctx context.Context, mode IOShapingMode) ([]IOShapingRecord, error) {
 	flag := "--apps"
 	switch mode {
@@ -64,6 +72,9 @@ func (c *Client) IOShaping(ctx context.Context, mode IOShapingMode) ([]IOShaping
 		if looksUnsupported(err, output) {
 			return nil, ErrIOShapingUnsupported
 		}
+		if detail := ioShapingRuntimeMismatch(output); detail != "" {
+			return nil, fmt.Errorf("io shaping unavailable: EOS CLI/library mismatch: %s", detail)
+		}
 		return nil, fmt.Errorf("io shaping ls: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 
@@ -76,7 +87,7 @@ func (c *Client) IOShaping(ctx context.Context, mode IOShapingMode) ([]IOShaping
 		ReadIOPS  float64 `json:"read_iops"`
 		WriteIOPS float64 `json:"write_iops"`
 	}
-	if err := json.Unmarshal(stripEOSPreamble(output), &raw); err != nil {
+	if err := unmarshalEOSJSON(output, &raw); err != nil {
 		return nil, fmt.Errorf("parse io shaping: %w", err)
 	}
 
@@ -100,6 +111,9 @@ func (c *Client) IOShapingPressure(ctx context.Context) ([]IOShapingPressureReco
 	if err != nil {
 		if looksUnsupported(err, output) || looksPressureUnsupported(err, output) {
 			return nil, ErrIOShapingUnsupported
+		}
+		if detail := ioShapingRuntimeMismatch(output); detail != "" {
+			return nil, fmt.Errorf("io shaping pressure unavailable: EOS CLI/library mismatch: %s", detail)
 		}
 		return nil, fmt.Errorf("io shaping pressure ls: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -127,7 +141,7 @@ func (c *Client) IOShapingPressure(ctx context.Context) ([]IOShapingPressureReco
 		NodeHasPressuredReadReservation   bool    `json:"node_has_pressured_read_reservation"`
 		NodeHasPressuredWriteReservation  bool    `json:"node_has_pressured_write_reservation"`
 	}
-	if err := json.Unmarshal(stripEOSPreamble(output), &raw); err != nil {
+	if err := unmarshalEOSJSON(output, &raw); err != nil {
 		return nil, fmt.Errorf("parse io shaping pressure: %w", err)
 	}
 
@@ -178,7 +192,7 @@ func (c *Client) IOShapingPolicies(ctx context.Context) ([]IOShapingPolicyRecord
 		ReservationReadBytesPerSec  float64 `json:"reservation_read_bytes_per_sec"`
 		ReservationWriteBytesPerSec float64 `json:"reservation_write_bytes_per_sec"`
 	}
-	if err := json.Unmarshal(stripEOSPreamble(output), &raw); err != nil {
+	if err := unmarshalEOSJSON(output, &raw); err != nil {
 		return nil, fmt.Errorf("parse io shaping policy: %w", err)
 	}
 
@@ -203,13 +217,16 @@ func (c *Client) IOShapingConfig(ctx context.Context) (IOShapingConfig, error) {
 		if looksUnsupported(err, output) {
 			return IOShapingConfig{}, ErrIOShapingUnsupported
 		}
+		if detail := ioShapingRuntimeMismatch(output); detail != "" {
+			return IOShapingConfig{}, fmt.Errorf("io shaping config unavailable: EOS CLI/library mismatch: %s", detail)
+		}
 		return IOShapingConfig{}, fmt.Errorf("io shaping config ls: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 
 	var raw struct {
 		LimitsEnabled bool `json:"limits_enabled"`
 	}
-	if err := json.Unmarshal(stripEOSPreamble(output), &raw); err != nil {
+	if err := unmarshalEOSJSON(output, &raw); err != nil {
 		return IOShapingConfig{}, fmt.Errorf("parse io shaping config: %w", err)
 	}
 
@@ -221,7 +238,11 @@ func (c *Client) SetIOShapingLimitsEnabled(ctx context.Context, enabled bool) er
 	if enabled {
 		state = "enabled"
 	}
-	if _, err := c.runCommandContext(ctx, "eos", "io", "shaping", "config", "set", "--limits", state); err != nil {
+	output, err := c.runCommandContext(ctx, "eos", "io", "shaping", "config", "set", "--limits", state)
+	if err != nil {
+		if detail := ioShapingRuntimeMismatch(output); detail != "" {
+			return fmt.Errorf("eos io shaping config set unavailable: CLI/library mismatch: %s", detail)
+		}
 		return fmt.Errorf("eos io shaping config set --limits %s: %w", state, err)
 	}
 	return nil
@@ -233,7 +254,11 @@ func (c *Client) SetIOShapingPolicy(ctx context.Context, update IOShapingPolicyU
 		return err
 	}
 
-	if _, err := c.runCommandContext(ctx, args...); err != nil {
+	output, err := c.runCommandContext(ctx, args...)
+	if err != nil {
+		if detail := ioShapingRuntimeMismatch(output); detail != "" {
+			return fmt.Errorf("eos io shaping policy set unavailable: CLI/library mismatch: %s", detail)
+		}
 		return fmt.Errorf("eos io shaping policy set %s: %w", update.ID, err)
 	}
 	return nil
@@ -244,7 +269,11 @@ func (c *Client) RemoveIOShapingPolicy(ctx context.Context, mode IOShapingMode, 
 	if err != nil {
 		return err
 	}
-	if _, err := c.runCommandContext(ctx, args...); err != nil {
+	output, err := c.runCommandContext(ctx, args...)
+	if err != nil {
+		if detail := ioShapingRuntimeMismatch(output); detail != "" {
+			return fmt.Errorf("eos io shaping policy rm unavailable: CLI/library mismatch: %s", detail)
+		}
 		return fmt.Errorf("eos io shaping policy rm %s: %w", id, err)
 	}
 	return nil

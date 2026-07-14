@@ -304,6 +304,28 @@ func fitLines(lines []string, height int) string {
 	return strings.Join(lines, "\n")
 }
 
+func normalizePanelLines(lines []string, contentWidth, contentHeight int) string {
+	if contentHeight <= 0 {
+		return ""
+	}
+
+	// Treat embedded newlines as physical rows before applying the height
+	// budget. This keeps a multi-line error from pushing the panel's bottom
+	// border out of the viewport. Every row is then cut and padded to the exact
+	// inner width so Lip Gloss never wraps it while adding the border.
+	rows := strings.Split(strings.Join(lines, "\n"), "\n")
+	if len(rows) > contentHeight {
+		rows = rows[:contentHeight]
+	}
+	for len(rows) < contentHeight {
+		rows = append(rows, "")
+	}
+	for i, row := range rows {
+		rows[i] = padVisibleWidth(row, contentWidth)
+	}
+	return strings.Join(rows, "\n")
+}
+
 func splitViewHeights(total int) (int, int) {
 	if total <= 3 {
 		return max(1, total-1), 1

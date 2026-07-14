@@ -72,6 +72,7 @@ eos-tui
 | `--ssh-accept-new-host-keys` | `EOS_TUI_SSH_ACCEPT_NEW_HOST_KEYS` | `false` | Accept new host keys automatically |
 | `--timeout` | `EOS_TUI_TIMEOUT` | `15s` | Per-request timeout |
 | `--idle-timeout` | `EOS_TUI_IDLE_TIMEOUT` | `1h` | Quit after this duration without keyboard input (`0` disables) |
+| `--refresh` | `EOS_TUI_REFRESH_INTERVAL` | `5s` | Refresh the active view automatically (`0` disables) |
 | `--no-alt-screen` | `EOS_TUI_NO_ALT_SCREEN` | `false` | Disable alternate screen |
 | `--version` | — | — | Print version and exit |
 
@@ -90,6 +91,8 @@ eos-tui
 - **Integrated shell** — open an interactive SSH shell to any selected node
 - **Apollon drain** — trigger drain workflows directly from the filesystem view
 - **Recent commands panel** — full history of every command issued this session
+- **Scoped auto-refresh** — refreshes only the active view, avoids overlapping requests, and keeps cached rows visible while updating
+- **Responsive layout & help** — compact tab navigation, live status/refresh state, and contextual `?` help on narrow terminals
 
 ## Keybindings
 
@@ -97,8 +100,11 @@ eos-tui
 
 | Key | Action |
 |---|---|
-| `tab` / `0`–`9` | Switch view |
+| `tab` / `shift+tab` | Next / previous view |
+| `0`–`9` | Jump directly to a view |
 | `r` | Refresh current view |
+| `P` | Pause / resume automatic refresh |
+| `?` | Open contextual keyboard help |
 | `l` | Open log overlay for selected node |
 | `s` | Open SSH shell to selected node |
 | `L` | Toggle recent-commands panel |

@@ -51,15 +51,15 @@ func (m model) renderAccessList(width, height int) string {
 	}
 
 	switch {
-	case m.accessLoading:
+	case m.accessLoading && len(records) == 0:
 		lines = append(lines, "Loading access rules...")
-	case m.accessErr != nil:
+	case m.accessErr != nil && len(records) == 0:
 		lines = append(lines, m.styles.error.Render(m.accessErr.Error()))
 	case len(records) == 0:
 		lines = append(lines, "(no entries)")
 	default:
 		start, end := visibleWindow(len(records), m.accessSelected, max(1, panelContentHeight(height)-len(lines)))
-		lines[0] = title + m.renderAccessControls() + renderScrollSummary(start, end, len(records))
+		lines[0] = renderInlineSuffix(title+m.renderAccessControls(), renderScrollSummary(start, end, len(records)), contentWidth)
 		for i := start; i < end; i++ {
 			line := formatTableRow(columns, dataRows[i])
 			if i == m.accessSelected {
@@ -69,7 +69,7 @@ func (m model) renderAccessList(width, height int) string {
 		}
 	}
 
-	return m.styles.panel.Width(width).Render(fitLines(lines, panelContentHeight(height)))
+	return m.styles.panel.Width(width).Render(normalizePanelLines(lines, contentWidth, panelContentHeight(height)))
 }
 
 func (m model) renderAccessDetails(width, height int) string {
@@ -106,7 +106,7 @@ func (m model) renderAccessDetails(width, height int) string {
 		truncate("eos access rm redirect|stall|limit ...", contentWidth),
 	)
 
-	return m.styles.panelDim.Width(width).Render(fitLines(lines, panelContentHeight(height)))
+	return m.styles.panelDim.Width(width).Render(normalizePanelLines(lines, contentWidth, panelContentHeight(height)))
 }
 
 func (m model) selectedAccessRecord() (eos.AccessRecord, bool) {
@@ -203,11 +203,7 @@ func (m model) renderAccessActionPopup() string {
 			m.styles.status.Render("enter apply  •  esc cancel"),
 		)
 
-		return m.styles.panel.
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("196")).
-			Padding(1, 2).
-			Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+		return m.renderModal(lines, lipgloss.Color("196"), 0)
 	}
 	for i, action := range m.accessAction.actions {
 		line := action.label
@@ -222,11 +218,7 @@ func (m model) renderAccessActionPopup() string {
 	}
 	lines = append(lines, "", m.styles.status.Render("↑↓ select  •  enter apply  •  esc cancel"))
 
-	return m.styles.panel.
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("196")).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return m.renderModal(lines, lipgloss.Color("196"), 0)
 }
 
 func accessActionsForRecord(record eos.AccessRecord) []accessActionOption {

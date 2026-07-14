@@ -1,6 +1,11 @@
 package eos
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestParseInspectorStats(t *testing.T) {
 	input := []byte(`
@@ -74,5 +79,25 @@ key=last tag=birthtime::volume bin=604800 value=33
 	}
 	if len(got.BirthVolume) != 1 || got.BirthVolume[0].Value != 33 {
 		t.Fatalf("BirthVolume = %+v, want one volume bin", got.BirthVolume)
+	}
+}
+
+func TestInspectorTreatsErrorRowAsFailureDespiteZeroExitStatus(t *testing.T) {
+	runner := &recordingRunner{out: []byte(`key=error space=default msg="inspector disabled"`)}
+	client := &Client{timeout: time.Second, runner: runner}
+
+	_, err := client.Inspector(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "inspector disabled") {
+		t.Fatalf("Inspector() error = %v, want disabled error", err)
+	}
+}
+
+func TestInspectorTreatsGenericErrorRowAsFailure(t *testing.T) {
+	runner := &recordingRunner{out: []byte(`key=error msg="backend unavailable"`)}
+	client := &Client{timeout: time.Second, runner: runner}
+
+	_, err := client.Inspector(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "backend unavailable") {
+		t.Fatalf("Inspector() error = %v, want backend error", err)
 	}
 }

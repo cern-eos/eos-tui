@@ -41,31 +41,62 @@ func initSessionLog() string {
 		return ""
 	}
 
-	logDir := filepath.Join(home, ".eos-tui", "sessions")
-	if err := os.MkdirAll(logDir, 0755); err != nil {
+	baseDir := filepath.Join(home, ".eos-tui")
+	if err := ensurePrivateDir(baseDir); err != nil {
+		return ""
+	}
+	logDir := filepath.Join(baseDir, "sessions")
+	if err := ensurePrivateDir(logDir); err != nil {
 		return ""
 	}
 
-	// Use a timestamp that is both human-readable and filesystem-safe.
+	// Keep the timestamp human-readable while letting CreateTemp add a random
+	// suffix. This avoids different processes reusing the same session file
+	// when they start within the same second.
 	ts := time.Now().Format("2006-01-02T15-04-05")
-	sessionFile := filepath.Join(logDir, ts+".log")
-
-	// Create the file immediately so the symlink target exists.
-	f, err := os.OpenFile(sessionFile, os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.CreateTemp(logDir, ts+"-*.log")
 	if err != nil {
 		return ""
 	}
-	f.Close()
+	sessionFile := f.Name()
+	if err := f.Chmod(0600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(sessionFile)
+		return ""
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(sessionFile)
+		return ""
+	}
 
-	// Update ~/.eos-tui/latest.log → sessions/<timestamp>.log (relative symlink).
-	latestLink := filepath.Join(home, ".eos-tui", "latest.log")
-	// Relative target from ~/.eos-tui/ to sessions/<ts>.log
-	relTarget := filepath.Join("sessions", ts+".log")
-	// Remove stale symlink (or file) then re-create.
-	_ = os.Remove(latestLink)
-	_ = os.Symlink(relTarget, latestLink)
+	// Update ~/.eos-tui/latest.log atomically so readers never observe a window
+	// where the link is absent. A relative target keeps the directory movable.
+	latestLink := filepath.Join(baseDir, "latest.log")
+	relTarget := filepath.Join("sessions", filepath.Base(sessionFile))
+	temporaryLink := filepath.Join(baseDir, ".latest.log."+filepath.Base(sessionFile)+".tmp")
+	if err := os.Symlink(relTarget, temporaryLink); err == nil {
+		if err := os.Rename(temporaryLink, latestLink); err != nil {
+			_ = os.Remove(temporaryLink)
+		}
+	}
 
 	return sessionFile
+}
+
+func ensurePrivateDir(dir string) error {
+	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+		return err
+	}
+
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("session log path is not a directory: %s", dir)
+	}
+
+	return os.Chmod(dir, 0700)
 }
 
 func (c *Client) Close() error {

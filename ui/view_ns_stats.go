@@ -25,6 +25,8 @@ type statsTable struct {
 }
 
 const statsListSummaryWidthCap = 40
+const statsMinListWidth = 58
+const statsMinDetailWidth = 44
 
 func (m model) renderNamespaceStatsView(height int) string {
 	panelHeight := height + 2
@@ -32,6 +34,13 @@ func (m model) renderNamespaceStatsView(height int) string {
 	m.statsSectionSelected = clampIndex(m.statsSectionSelected, len(sections))
 
 	totalWidth := m.panelWidth() + 2
+	if statsUsesSinglePane(totalWidth) {
+		paneWidth := max(1, totalWidth-2)
+		if m.statsPaneFocus == statsFocusDetail {
+			return normalizeBlockWidth(m.renderStatsSectionDetails(paneWidth, panelHeight, sections), totalWidth)
+		}
+		return normalizeBlockWidth(m.renderStatsSectionList(paneWidth, panelHeight, sections), totalWidth)
+	}
 	gap := 1
 	availableWidth := max(1, totalWidth-gap)
 	listWidth, detailWidth := m.statsPaneWidths(availableWidth, sections)
@@ -80,10 +89,10 @@ func (m model) statsSections() []statsSection {
 func (m model) clusterStatsSection() statsSection {
 	section := statsSection{title: "Cluster Summary"}
 	switch {
-	case m.fstStatsLoading:
+	case m.fstStatsLoading && m.nodeStats == (eos.NodeStats{}):
 		section.summary = "loading"
 		section.lines = []string{"Loading cluster summary..."}
-	case m.nodeStatsErr != nil:
+	case m.nodeStatsErr != nil && m.nodeStats == (eos.NodeStats{}):
 		section.summary = "error"
 		section.lines = []string{m.nodeStatsErr.Error()}
 	default:
@@ -102,10 +111,10 @@ func (m model) clusterStatsSection() statsSection {
 func (m model) namespaceOverviewSection() statsSection {
 	section := statsSection{title: "Namespace Overview"}
 	switch {
-	case m.nsStatsLoading:
+	case m.nsStatsLoading && m.namespaceStats == (eos.NamespaceStats{}):
 		section.summary = "loading"
 		section.lines = []string{"Loading namespace statistics..."}
-	case m.nsStatsErr != nil:
+	case m.nsStatsErr != nil && m.namespaceStats == (eos.NamespaceStats{}):
 		section.summary = "error"
 		section.lines = []string{m.nsStatsErr.Error()}
 	default:
@@ -124,10 +133,10 @@ func (m model) namespaceOverviewSection() statsSection {
 func (m model) namespaceCacheSection() statsSection {
 	section := statsSection{title: "Cache & Contention"}
 	switch {
-	case m.nsStatsLoading:
+	case m.nsStatsLoading && m.namespaceStats == (eos.NamespaceStats{}):
 		section.summary = "loading"
 		section.lines = []string{"Loading namespace statistics..."}
-	case m.nsStatsErr != nil:
+	case m.nsStatsErr != nil && m.namespaceStats == (eos.NamespaceStats{}):
 		section.summary = "error"
 		section.lines = []string{m.nsStatsErr.Error()}
 	default:
@@ -147,10 +156,10 @@ func (m model) namespaceCacheSection() statsSection {
 func (m model) inspectorOverviewSection() statsSection {
 	section := statsSection{title: "Inspector Overview"}
 	switch {
-	case m.inspectorLoading:
+	case m.inspectorLoading && !hasInspectorStatsData(m.inspectorStats):
 		section.summary = "loading"
 		section.lines = []string{"Loading inspector statistics..."}
-	case m.inspectorErr != nil:
+	case m.inspectorErr != nil && !hasInspectorStatsData(m.inspectorStats):
 		section.summary = inspectorErrorSummary(m.inspectorErr)
 		section.lines = []string{m.inspectorErr.Error()}
 	default:
@@ -169,10 +178,10 @@ func (m model) inspectorOverviewSection() statsSection {
 func (m model) inspectorLayoutsSection() statsSection {
 	section := statsSection{title: "Inspector Layouts"}
 	switch {
-	case m.inspectorLoading:
+	case m.inspectorLoading && len(m.inspectorStats.Layouts) == 0:
 		section.summary = "loading"
 		section.lines = []string{"Loading inspector layout data..."}
-	case m.inspectorErr != nil:
+	case m.inspectorErr != nil && len(m.inspectorStats.Layouts) == 0:
 		section.summary = inspectorErrorSummary(m.inspectorErr)
 		section.lines = []string{m.inspectorErr.Error()}
 	case len(m.inspectorStats.Layouts) == 0:
@@ -194,10 +203,10 @@ func (m model) inspectorLayoutsSection() statsSection {
 func (m model) inspectorUsersSection() statsSection {
 	section := statsSection{title: "Inspector Users"}
 	switch {
-	case m.inspectorLoading:
+	case m.inspectorLoading && len(m.inspectorStats.UserCosts) == 0:
 		section.summary = "loading"
 		section.lines = []string{"Loading inspector user cost data..."}
-	case m.inspectorErr != nil:
+	case m.inspectorErr != nil && len(m.inspectorStats.UserCosts) == 0:
 		section.summary = inspectorErrorSummary(m.inspectorErr)
 		section.lines = []string{m.inspectorErr.Error()}
 	case len(m.inspectorStats.UserCosts) == 0:
@@ -218,10 +227,10 @@ func (m model) inspectorUsersSection() statsSection {
 func (m model) inspectorGroupsSection() statsSection {
 	section := statsSection{title: "Inspector Groups"}
 	switch {
-	case m.inspectorLoading:
+	case m.inspectorLoading && len(m.inspectorStats.GroupCosts) == 0:
 		section.summary = "loading"
 		section.lines = []string{"Loading inspector group cost data..."}
-	case m.inspectorErr != nil:
+	case m.inspectorErr != nil && len(m.inspectorStats.GroupCosts) == 0:
 		section.summary = inspectorErrorSummary(m.inspectorErr)
 		section.lines = []string{m.inspectorErr.Error()}
 	case len(m.inspectorStats.GroupCosts) == 0:
@@ -250,10 +259,10 @@ func (m model) inspectorBirthAgeSection() statsSection {
 func (m model) inspectorBinsSection(title string, files, volume []eos.InspectorBin, loading bool, err error) statsSection {
 	section := statsSection{title: title}
 	switch {
-	case loading:
+	case loading && len(files) == 0 && len(volume) == 0:
 		section.summary = "loading"
 		section.lines = []string{"Loading inspector age-bucket data..."}
-	case err != nil:
+	case err != nil && len(files) == 0 && len(volume) == 0:
 		section.summary = inspectorErrorSummary(err)
 		section.lines = []string{err.Error()}
 	case len(files) == 0 && len(volume) == 0:
@@ -304,7 +313,7 @@ func (m model) renderStatsSectionList(width, height int, sections []statsSection
 		m.renderSimpleHeaderRow(columns, []string{"section", "summary"}),
 	}
 	start, end := visibleWindow(len(sections), m.statsSectionSelected, max(1, panelContentHeight(height)-len(lines)))
-	lines[0] = title + renderScrollSummary(start, end, len(sections))
+	lines[0] = renderInlineSuffix(title, renderScrollSummary(start, end, len(sections)), contentWidth)
 	for i := start; i < end; i++ {
 		line := formatTableRow(columns, dataRows[i])
 		if i == m.statsSectionSelected {
@@ -317,7 +326,7 @@ func (m model) renderStatsSectionList(width, height int, sections []statsSection
 	if m.statsPaneFocus == statsFocusDetail {
 		style = m.styles.panelDim
 	}
-	return style.Width(width).Render(fitLines(lines, panelContentHeight(height)))
+	return style.Width(width).Render(normalizePanelLines(lines, contentWidth, panelContentHeight(height)))
 }
 
 func (m model) renderStatsSectionDetails(width, height int, sections []statsSection) string {
@@ -327,7 +336,7 @@ func (m model) renderStatsSectionDetails(width, height int, sections []statsSect
 		if m.statsPaneFocus == statsFocusDetail {
 			style = m.styles.panel
 		}
-		return style.Width(width).Render(fitLines([]string{"No statistics available"}, panelContentHeight(height)))
+		return style.Width(width).Render(normalizePanelLines([]string{"No statistics available"}, contentWidth, panelContentHeight(height)))
 	}
 
 	selected := sections[clampIndex(m.statsSectionSelected, len(sections))]
@@ -347,7 +356,7 @@ func (m model) renderStatsSectionDetails(width, height int, sections []statsSect
 		capacity := max(1, panelContentHeight(height)-len(lines)-1)
 		selectedRow := clampIndex(m.statsDetailSelected, len(filteredRows))
 		start, end := visibleWindow(len(filteredRows), selectedRow, capacity)
-		lines[0] = lines[0] + renderScrollSummary(start, end, len(filteredRows))
+		lines[0] = renderInlineSuffix(lines[0], renderScrollSummary(start, end, len(filteredRows)), contentWidth)
 		xOffset := m.statsAdjustedOffsetX(selected, contentWidth)
 		header := m.renderSelectableHeaderRow(selected.table.columns, selected.table.labels, m.statsDetailColumnSelected, sortState{column: -1}, m.statsFilter)
 		lines = append(lines, cropStatsLine(header, xOffset, contentWidth))
@@ -377,22 +386,22 @@ func (m model) statsListNaturalWidth(sections []statsSection) int {
 }
 
 func (m model) statsPaneWidths(totalWidth int, sections []statsSection) (listWidth, detailWidth int) {
-	const minListWidth = 58
-	const minDetailWidth = 44
+	listNaturalWidth := max(statsMinListWidth, m.statsListNaturalWidth(sections))
 
-	listNaturalWidth := max(minListWidth, m.statsListNaturalWidth(sections))
-
-	if totalWidth <= minListWidth+minDetailWidth {
-		detailWidth = max(minDetailWidth, totalWidth/2)
-		listWidth = max(minListWidth, totalWidth-detailWidth)
-		return listWidth, max(minDetailWidth, totalWidth-listWidth)
+	if statsUsesSinglePane(totalWidth) {
+		listWidth = max(1, totalWidth/2)
+		return listWidth, max(1, totalWidth-listWidth)
 	}
 
-	listWidth = min(listNaturalWidth, totalWidth-minDetailWidth)
-	listWidth = max(minListWidth, listWidth)
+	listWidth = min(listNaturalWidth, totalWidth-statsMinDetailWidth)
+	listWidth = max(statsMinListWidth, listWidth)
 	detailWidth = totalWidth - listWidth
 
 	return listWidth, detailWidth
+}
+
+func statsUsesSinglePane(totalWidth int) bool {
+	return totalWidth < statsMinListWidth+statsMinDetailWidth+1
 }
 
 func (m model) visibleStatsTableRows(section statsSection) [][]string {
@@ -493,6 +502,9 @@ func (m model) currentStatsBodyHeight() int {
 
 func (m model) currentStatsDetailContentWidth(sections []statsSection) int {
 	totalWidth := m.panelWidth() + 2
+	if statsUsesSinglePane(totalWidth) {
+		return panelContentWidth(max(1, totalWidth-2))
+	}
 	gap := 1
 	availableWidth := max(1, totalWidth-gap)
 	_, detailWidth := m.statsPaneWidths(availableWidth, sections)
@@ -544,6 +556,9 @@ func (m model) statsDetailLineCount(sections []statsSection) int {
 		return 0
 	}
 	selected := sections[clampIndex(m.statsSectionSelected, len(sections))]
+	if selected.table != nil {
+		return len(m.visibleStatsTableRows(selected))
+	}
 	return len(m.statsVisibleDetailLines(selected))
 }
 

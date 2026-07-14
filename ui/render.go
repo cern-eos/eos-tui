@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
+	bubblesTable "github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -28,7 +30,7 @@ var splashTUI = []string{
 }
 
 func (m model) renderHeader() string {
-	maxWidth := m.contentWidth()
+	maxWidth := max(1, m.contentWidth())
 	parts := []string{m.styles.header.Render("EOS TUI"), "  "}
 	for i, t := range orderedViewTabs {
 		if i > 0 {
@@ -43,18 +45,206 @@ func (m model) renderHeader() string {
 
 	left := lipgloss.JoinHorizontal(lipgloss.Left, parts...)
 	rightLabel := m.styles.label.Render("target ")
-	maxLeftWidth := max(0, maxWidth-1-lipgloss.Width(rightLabel))
-	if lipgloss.Width(left) > maxLeftWidth {
-		left = padVisibleWidth(left, maxLeftWidth)
+	endpointWidth := min(lipgloss.Width(m.endpoint), max(0, maxWidth/3))
+	fullRight := rightLabel + m.styles.value.Render(truncate(m.endpoint, endpointWidth))
+	compact := lipgloss.Width(left)+1+lipgloss.Width(fullRight) > maxWidth
+	if compact {
+		activeIndex := 0
+		activeLabel := ""
+		for i, tab := range orderedViewTabs {
+			if tab.view == m.activeView {
+				activeIndex = i
+				activeLabel = tab.label
+				break
+			}
+		}
+		compactParts := []string{
+			m.styles.tabActive.Render(activeLabel),
+			m.styles.status.Render(fmt.Sprintf(" %d/%d", activeIndex+1, len(orderedViewTabs))),
+		}
+		if maxWidth >= 36 {
+			compactParts = append([]string{m.styles.header.Render("EOS TUI"), "  "}, compactParts...)
+		}
+		left = lipgloss.JoinHorizontal(lipgloss.Left, compactParts...)
 	}
-	availableRightValue := max(0, maxWidth-lipgloss.Width(left)-1-lipgloss.Width(rightLabel))
-	right := rightLabel + m.styles.value.Render(truncate(m.endpoint, availableRightValue))
-	spacerWidth := max(1, maxWidth-lipgloss.Width(left)-lipgloss.Width(right))
+	right := ""
+	if !compact {
+		right = fullRight
+	} else if remaining := maxWidth - lipgloss.Width(left) - 1; remaining >= lipgloss.Width(rightLabel)+5 {
+		valueWidth := remaining - lipgloss.Width(rightLabel)
+		right = rightLabel + m.styles.value.Render(truncate(m.endpoint, valueWidth))
+	}
+	spacerWidth := max(0, maxWidth-lipgloss.Width(left)-lipgloss.Width(right))
+	if right != "" && spacerWidth < 1 {
+		right = ""
+		spacerWidth = max(0, maxWidth-lipgloss.Width(left))
+	}
 
 	return padVisibleWidth(lipgloss.JoinHorizontal(lipgloss.Left, left, strings.Repeat(" ", spacerWidth), right), maxWidth)
 }
 
 func (m model) renderFooter() string {
+	statusText := strings.TrimSpace(ansi.Strip(m.status))
+	if activeError := m.activeViewErrorStatus(); activeError != "" {
+		statusText = activeError
+	}
+	if statusText == "" {
+		statusText = "Ready"
+	}
+	statusStyle := m.styles.value
+	lowerStatus := strings.ToLower(statusText)
+	if strings.Contains(lowerStatus, "fail") || strings.Contains(lowerStatus, "error") || strings.Contains(lowerStatus, "unavailable") {
+		statusStyle = m.styles.error
+	}
+
+	refreshText := fmt.Sprintf("auto %s", m.refreshInterval)
+	if !m.autoRefresh {
+		refreshText = "auto paused"
+	} else if !m.activeViewAutoRefreshes() {
+		refreshText = "manual refresh"
+	} else if m.activeViewLoading() {
+		refreshText = "refreshing"
+	} else if updated := m.activeViewLastRefresh(); !updated.IsZero() {
+		refreshText = "updated " + shortAge(time.Since(updated))
+	}
+	refreshToggle := "P pause"
+	if !m.autoRefresh {
+		refreshToggle = "P resume"
+	}
+	right := m.styles.status.Render("? help  •  " + refreshToggle + "  •  " + refreshText)
+	contentWidth := m.contentWidth()
+	statusLine := padVisibleWidth(right, contentWidth)
+	if rightWidth := lipgloss.Width(right); rightWidth < contentWidth {
+		availableStatus := contentWidth - rightWidth - 1
+		left := ""
+		if availableStatus > 0 {
+			left = statusStyle.Render(truncate(statusText, availableStatus))
+		}
+		spacer := strings.Repeat(" ", max(1, contentWidth-lipgloss.Width(left)-rightWidth))
+		statusLine = padVisibleWidth(left+spacer+right, contentWidth)
+	}
+
+	return statusLine + "\n" + m.renderKeyHints()
+}
+
+func (m model) activeViewAutoRefreshes() bool {
+	switch m.activeView {
+	case viewNamespace:
+		return false
+	default:
+		return true
+	}
+}
+
+func (m model) activeViewErrorStatus() string {
+	format := func(component string, err error) string {
+		if err == nil {
+			return ""
+		}
+		return fmt.Sprintf("%s: %v", component, err)
+	}
+	switch m.activeView {
+	case viewMGM, viewQDB:
+		if status := format("MGM/QDB refresh failed", m.mgmsErr); status != "" {
+			return status
+		}
+		return format("MGM/QDB version refresh partial", m.mgmVersionsErr)
+	case viewFST:
+		return format("FST refresh failed", m.fstsErr)
+	case viewFileSystems:
+		return format("Filesystem refresh failed", m.fileSystemsErr)
+	case viewNamespace:
+		if status := format("Namespace refresh failed", m.nsErr); status != "" {
+			return status
+		}
+		return format("Attribute refresh failed", m.nsAttrsErr)
+	case viewSpaces:
+		if m.spaceStatusActive {
+			return format("Space status refresh failed", m.spaceStatusErr)
+		}
+		return format("Spaces refresh failed", m.spacesErr)
+	case viewNamespaceStats:
+		for _, item := range []struct {
+			label string
+			err   error
+		}{
+			{"Cluster summary refresh failed", m.nodeStatsErr},
+			{"Namespace statistics refresh failed", m.nsStatsErr},
+			{"FST refresh failed", m.fstsErr},
+			{"Filesystem refresh failed", m.fileSystemsErr},
+		} {
+			if status := format(item.label, item.err); status != "" {
+				return status
+			}
+		}
+		if m.inspectorErr != nil && inspectorErrorSummary(m.inspectorErr) != "disabled" {
+			return format("Inspector refresh failed", m.inspectorErr)
+		}
+	case viewIOShaping:
+		if status := format("IO traffic refresh failed", m.ioShapingErr); status != "" {
+			return status
+		}
+		if status := format("IO policy refresh partial", m.ioShapingPoliciesErr); status != "" {
+			return status
+		}
+		return format("IO configuration refresh failed", m.ioShapingConfigErr)
+	case viewGroups:
+		return format("Groups refresh failed", m.groupsErr)
+	case viewVID:
+		return format("VID refresh failed", m.vidErr)
+	case viewAccess:
+		return format("Access refresh failed", m.accessErr)
+	}
+	return ""
+}
+
+func shortAge(age time.Duration) string {
+	if age < 0 {
+		age = 0
+	}
+	if age < time.Second {
+		return "now"
+	}
+	if age < time.Minute {
+		return fmt.Sprintf("%ds ago", int(age.Seconds()))
+	}
+	if age < time.Hour {
+		return fmt.Sprintf("%dm ago", int(age.Minutes()))
+	}
+	return fmt.Sprintf("%dh ago", int(age.Hours()))
+}
+
+func (m model) activeViewLoading() bool {
+	switch m.activeView {
+	case viewMGM, viewQDB:
+		return m.mgmsLoading || m.mgmVersionsLoading
+	case viewFST:
+		return m.fstsLoading
+	case viewFileSystems:
+		return m.fileSystemsLoading
+	case viewNamespace:
+		return m.nsLoading
+	case viewSpaces:
+		if m.spaceStatusActive {
+			return m.spaceStatusLoading
+		}
+		return m.spacesLoading
+	case viewNamespaceStats:
+		return m.fstStatsLoading || m.nsStatsLoading || m.fstsLoading || m.fileSystemsLoading || m.inspectorLoading
+	case viewIOShaping:
+		return m.ioShapingLoading || m.ioShapingPoliciesLoading || m.ioShapingConfigLoading
+	case viewGroups:
+		return m.groupsLoading
+	case viewVID:
+		return m.vidLoading
+	case viewAccess:
+		return m.accessLoading
+	default:
+		return false
+	}
+}
+
+func (m model) renderKeyHints() string {
 	if m.log.active {
 		filter := ""
 		if m.log.filter != "" {
@@ -195,6 +385,20 @@ func (m model) renderStartupSplash(height int) string {
 	if m.splash.frame%2 == 1 {
 		titleStyle = m.styles.splash.Foreground(lipgloss.Color("159"))
 	}
+	// The full mark needs 39 columns including its border and padding. Use a
+	// compact identity below that threshold so startup is as responsive as the
+	// application chrome instead of displaying clipped ASCII art.
+	if m.contentWidth() < 39 || height < 20 {
+		box := m.styles.splashBox.
+			Padding(1, 2).
+			Render(lipgloss.JoinVertical(
+				lipgloss.Center,
+				titleStyle.Render("EOS TUI"),
+				"",
+				m.styles.status.Render(loader),
+			))
+		return m.renderOverlay(base, box, height)
+	}
 
 	lines := []string{}
 	for _, line := range splashEOS {
@@ -232,7 +436,10 @@ func (m model) normalizeRenderedBlock(block string, height int) string {
 }
 
 func (m model) splitMainAndCommandHeights(total int) (mainHeight, commandHeight int) {
-	if !m.commandLog.active {
+	// At very narrow widths the history panel conveys only clipped fragments
+	// and leaves too little height for multi-panel operational views. Preserve
+	// its enabled state, but prioritize current data until the terminal grows.
+	if !m.commandLog.active || m.contentWidth() < 32 {
 		return total, 0
 	}
 
@@ -257,6 +464,9 @@ func (m model) metricLine(leftLabel, leftValue, rightLabel, rightValue string) s
 }
 
 func (m model) renderSectionTitle(title string, width int) string {
+	if width > 0 {
+		title = truncate(title, width)
+	}
 	titleText := m.styles.section.Render(title)
 	if width <= 0 {
 		return titleText
@@ -271,11 +481,11 @@ func (m model) renderSectionTitle(title string, width int) string {
 }
 
 func (m model) contentWidth() int {
-	return max(20, m.width-2)
+	return max(1, m.width-2)
 }
 
 func (m model) panelWidth() int {
-	return max(18, m.contentWidth()-2)
+	return max(1, m.contentWidth()-2)
 }
 
 func (m model) renderSimpleHeaderRow(columns []tableColumn, labels []string) string {
@@ -353,9 +563,15 @@ func (m model) renderFilterPopup() string {
 		title = "Filter " + m.fsFilterColumnLabel()
 	}
 
-	contentWidth := min(80, max(40, m.contentWidth()-8))
-	inputView := m.popup.input.View()
-	tableView := m.popup.table.View()
+	// panelDim's border and horizontal padding consume four columns.
+	contentWidth := min(80, max(1, m.contentWidth()-4))
+	input := m.popup.input
+	input.Width = contentWidth
+	table := m.popup.table
+	table.SetWidth(contentWidth)
+	table.SetColumns([]bubblesTable.Column{{Title: "value", Width: max(1, contentWidth-4)}})
+	inputView := input.View()
+	tableView := table.View()
 	hint := m.styles.status.Render("Enter apply selected value • Esc cancel")
 
 	box := lipgloss.JoinVertical(
@@ -373,7 +589,7 @@ func (m model) renderFilterPopup() string {
 }
 
 func (m model) renderCommandPanel(height int) string {
-	width := max(18, m.contentWidth()-2)
+	width := max(1, m.contentWidth()-2)
 	innerWidth := max(1, width-4)
 	innerHeight := max(1, height-2)
 
@@ -413,6 +629,43 @@ func (m model) renderCommandPanel(height int) string {
 	return m.styles.panelDim.Width(width).Render(strings.Join(lines, "\n"))
 }
 
+// modalContentWidth clamps a requested inner width to the space left after a
+// rounded border and Padding(1, 2). This must happen before layout; clipping a
+// fully rendered box loses its right border and cannot reflow its contents.
+func (m model) modalContentWidth(preferred int) int {
+	available := max(1, m.contentWidth()-6)
+	if preferred <= 0 {
+		return available
+	}
+	return min(preferred, available)
+}
+
+// renderModal lays out every row within the terminal-aware inner width before
+// adding borders. ANSI-aware hard wrapping keeps long commands and guidance
+// visible without producing malformed boxes on narrow terminals.
+func (m model) renderModal(lines []string, borderColor lipgloss.Color, preferredWidth int) string {
+	if preferredWidth <= 0 {
+		preferredWidth = 1
+		for _, line := range lines {
+			preferredWidth = max(preferredWidth, lipgloss.Width(line))
+		}
+	}
+	contentWidth := m.modalContentWidth(preferredWidth)
+	wrapped := make([]string, 0, len(lines))
+	for _, line := range lines {
+		parts := strings.Split(ansi.Hardwrap(line, contentWidth, true), "\n")
+		for _, part := range parts {
+			wrapped = append(wrapped, padVisibleWidth(part, contentWidth))
+		}
+	}
+
+	return m.styles.panel.
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Padding(1, 2).
+		Render(lipgloss.JoinVertical(lipgloss.Left, wrapped...))
+}
+
 func padVisibleWidth(s string, width int) string {
 	if width <= 0 {
 		return ""
@@ -422,6 +675,26 @@ func padVisibleWidth(s string, width int) string {
 		return ansi.Cut(s, 0, width)
 	}
 	return s + strings.Repeat(" ", width-w)
+}
+
+// renderInlineSuffix keeps a title/controls prefix and a compact status suffix
+// on one terminal row. The prefix is clipped first so scroll summaries never
+// wrap a bordered panel and push its bottom border out of the viewport.
+func renderInlineSuffix(prefix, suffix string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	suffix = strings.TrimSpace(suffix)
+	if suffix == "" {
+		return ansi.Cut(prefix, 0, width)
+	}
+	suffixWidth := lipgloss.Width(suffix)
+	if suffixWidth >= width {
+		return ansi.Cut(suffix, 0, width)
+	}
+	leftWidth := width - suffixWidth - 1
+	left := padVisibleWidth(ansi.Cut(prefix, 0, leftWidth), leftWidth)
+	return left + " " + suffix
 }
 
 func filterValueLabel(current string, active bool, input string) string {

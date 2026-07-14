@@ -10,6 +10,9 @@ import (
 
 func (c *Client) Inspector(ctx context.Context) (InspectorStats, error) {
 	output, err := c.runCommandContext(ctx, "eos", "inspector", "-l", "-m")
+	if reported := inspectorReportedError(output); reported != nil {
+		return InspectorStats{}, reported
+	}
 	if err != nil {
 		msg := strings.TrimSpace(string(output))
 		lower := strings.ToLower(msg)
@@ -26,6 +29,32 @@ func (c *Client) Inspector(ctx context.Context) (InspectorStats, error) {
 	}
 
 	return parseInspectorStats(output), nil
+}
+
+// inspectorReportedError handles an EOS quirk where `eos inspector` can emit
+// a machine-readable error row while still returning exit status 0.
+func inspectorReportedError(output []byte) error {
+	text := strings.TrimSpace(string(output))
+	lower := strings.ToLower(text)
+	switch {
+	case strings.Contains(lower, "inspector disabled"):
+		return fmt.Errorf("inspector disabled")
+	case strings.Contains(lower, "permission denied"):
+		return fmt.Errorf("inspector unavailable on this host: permission denied")
+	}
+
+	for _, rawLine := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if !strings.Contains(strings.ToLower(line), "key=error") {
+			continue
+		}
+		detail := line
+		if _, value, found := strings.Cut(line, "msg="); found {
+			detail = strings.Trim(strings.TrimSpace(value), `"`)
+		}
+		return fmt.Errorf("inspector unavailable: %s", detail)
+	}
+	return nil
 }
 
 func parseInspectorStats(output []byte) InspectorStats {

@@ -2,7 +2,6 @@ package eos
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
@@ -103,7 +102,7 @@ func (c *Client) Nodes(ctx context.Context) ([]FstRecord, error) {
 		} `json:"result"`
 	}
 
-	if err := json.Unmarshal(stripEOSPreamble(output), &payload); err != nil {
+	if err := unmarshalEOSJSON(output, &payload); err != nil {
 		return nil, fmt.Errorf("parse node ls: %w (output: %.200s)", err, output)
 	}
 

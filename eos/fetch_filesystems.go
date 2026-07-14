@@ -2,7 +2,6 @@ package eos
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -54,7 +53,7 @@ func parseFileSystemsJSON(output []byte) ([]FileSystemRecord, error) {
 		} `json:"result"`
 	}
 
-	if err := json.Unmarshal(stripEOSPreamble(output), &payload); err != nil {
+	if err := unmarshalEOSJSON(output, &payload); err != nil {
 		return nil, fmt.Errorf("parse fs ls: %w (output: %.200s)", err, output)
 	}
 

@@ -11,7 +11,10 @@ import (
 	"github.com/lobis/eos-tui/eos"
 )
 
-const refreshInterval = 5 * time.Second
+const defaultRefreshInterval = 5 * time.Second
+const inspectorRefreshInterval = 30 * time.Second
+const inspectorFailureRetryInterval = 5 * time.Minute
+const mgmVersionRefreshInterval = time.Minute
 
 type viewID int
 
@@ -90,13 +93,15 @@ type infraLoadedMsg struct {
 }
 
 type nodeStatsLoadedMsg struct {
-	stats eos.NodeStats
-	err   error
+	generation uint64
+	stats      eos.NodeStats
+	err        error
 }
 
 type fstsLoadedMsg struct {
-	fsts []eos.FstRecord
-	err  error
+	generation uint64
+	fsts       []eos.FstRecord
+	err        error
 }
 
 type nodeStatusResultMsg struct {
@@ -106,61 +111,73 @@ type nodeStatusResultMsg struct {
 }
 
 type fileSystemsLoadedMsg struct {
-	fs  []eos.FileSystemRecord
-	err error
+	generation uint64
+	fs         []eos.FileSystemRecord
+	err        error
 }
 
 type mgmsLoadedMsg struct {
-	mgms []eos.MgmRecord
-	err  error
+	generation uint64
+	mgms       []eos.MgmRecord
+	err        error
 }
 
 type mgmVersionsLoadedMsg struct {
+	generation  uint64
 	mgmVersions map[string]string
 	qdbVersions map[string]string
 	err         error
 }
 
 type spacesLoadedMsg struct {
-	spaces []eos.SpaceRecord
-	err    error
+	generation uint64
+	spaces     []eos.SpaceRecord
+	err        error
 }
 
 type groupsLoadedMsg struct {
-	groups []eos.GroupRecord
-	err    error
+	generation uint64
+	groups     []eos.GroupRecord
+	err        error
 }
 
 type inspectorLoadedMsg struct {
-	stats eos.InspectorStats
-	err   error
+	generation uint64
+	stats      eos.InspectorStats
+	err        error
 }
 
 type vidLoadedMsg struct {
-	mode    vidListMode
-	records []eos.VIDRecord
-	err     error
+	mode       vidListMode
+	generation uint64
+	records    []eos.VIDRecord
+	err        error
 }
 
 type accessLoadedMsg struct {
-	records []eos.AccessRecord
-	err     error
+	generation uint64
+	records    []eos.AccessRecord
+	err        error
 }
 
 type namespaceStatsLoadedMsg struct {
-	stats eos.NamespaceStats
-	err   error
+	generation uint64
+	stats      eos.NamespaceStats
+	err        error
 }
 
 type directoryLoadedMsg struct {
+	path      string
+	requestID uint64
 	directory eos.Directory
 	err       error
 }
 
 type namespaceAttrsLoadedMsg struct {
-	path  string
-	attrs []eos.NamespaceAttr
-	err   error
+	path      string
+	requestID uint64
+	attrs     []eos.NamespaceAttr
+	err       error
 }
 
 type namespaceAttrSetResultMsg struct {
@@ -175,9 +192,10 @@ type namespaceMkdirResultMsg struct {
 }
 
 type spaceStatusLoadedMsg struct {
-	space   string
-	records []eos.SpaceStatusRecord
-	err     error
+	space     string
+	requestID uint64
+	records   []eos.SpaceStatusRecord
+	err       error
 }
 
 type spaceConfigResultMsg struct {
@@ -201,25 +219,29 @@ type accessActionResultMsg struct {
 }
 
 type ioShapingLoadedMsg struct {
-	records []eos.IOShapingRecord
-	mode    eos.IOShapingMode
-	err     error
+	records    []eos.IOShapingRecord
+	mode       eos.IOShapingMode
+	generation uint64
+	err        error
 }
 
 type ioShapingPressureLoadedMsg struct {
-	records []eos.IOShapingPressureRecord
-	mode    eos.IOShapingMode
-	err     error
+	records    []eos.IOShapingPressureRecord
+	mode       eos.IOShapingMode
+	generation uint64
+	err        error
 }
 
 type ioShapingPoliciesLoadedMsg struct {
-	records []eos.IOShapingPolicyRecord
-	err     error
+	records    []eos.IOShapingPolicyRecord
+	generation uint64
+	err        error
 }
 
 type ioShapingConfigLoadedMsg struct {
-	config eos.IOShapingConfig
-	err    error
+	config     eos.IOShapingConfig
+	generation uint64
+	err        error
 }
 
 type ioShapingPolicyResultMsg struct {
@@ -238,32 +260,35 @@ type eosVersionLoadedMsg struct {
 }
 
 type logLoadedMsg struct {
-	filePath string
-	lines    []string
-	notice   string
-	err      error
+	filePath   string
+	generation uint64
+	lines      []string
+	notice     string
+	err        error
 }
 
 type commandHistoryLoadedMsg struct {
-	filePath string
-	lines    []string
-	err      error
+	filePath   string
+	generation uint64
+	lines      []string
+	err        error
 }
 
 type shellExitedMsg struct {
 	err error
 }
 
-type ioShapingTickMsg struct{}
-type ioShapingPolicyTickMsg struct{}
-type commandLogTickMsg struct{}
-type logTickMsg struct{}
+type commandLogTickMsg struct{ generation uint64 }
+type logTickMsg struct{ generation uint64 }
 type splashTickMsg struct{}
 
 type tickMsg time.Time
+type idleTickMsg time.Time
 
 type fsConfigStatusResultMsg struct {
-	err error
+	fsID  uint64
+	value string
+	err   error
 }
 
 type fsConfigStatusBatchResultMsg struct {
@@ -482,11 +507,13 @@ type logOverlay struct {
 	err         error
 	notice      string
 	loading     bool
+	inFlight    bool
 }
 
 type commandPanel struct {
 	active   bool
 	loading  bool
+	inFlight bool
 	filePath string
 	lines    []string
 	err      error
@@ -757,8 +784,13 @@ type model struct {
 	client   *eos.Client
 	endpoint string
 
-	idleTimeout  time.Duration
-	lastActivity time.Time
+	idleTimeout        time.Duration
+	lastActivity       time.Time
+	refreshInterval    time.Duration
+	autoRefresh        bool
+	lastRefreshAt      [viewCount]time.Time
+	inspectorUpdated   time.Time
+	mgmVersionsUpdated time.Time
 
 	width  int
 	height int
@@ -806,11 +838,23 @@ type model struct {
 	groupsSelected       int
 	groupsColumnSelected int
 
-	vidMode     vidListMode
-	vidRecords  []eos.VIDRecord
-	vidLoading  bool
-	vidErr      error
-	vidSelected int
+	vidMode       vidListMode
+	vidRecords    []eos.VIDRecord
+	vidLoading    bool
+	vidErr        error
+	vidSelected   int
+	vidGeneration uint64
+
+	nodeStatsGeneration      uint64
+	fstsGeneration           uint64
+	fileSystemsGeneration    uint64
+	mgmsGeneration           uint64
+	mgmVersionsGeneration    uint64
+	spacesGeneration         uint64
+	groupsGeneration         uint64
+	accessGeneration         uint64
+	namespaceStatsGeneration uint64
+	inspectorGeneration      uint64
 
 	accessRecords        []eos.AccessRecord
 	accessLoading        bool
@@ -834,14 +878,17 @@ type model struct {
 	statsDetailOffsetY        int
 	statsFilter               filterState
 
-	directory  eos.Directory
-	nsLoaded   bool
-	nsLoading  bool
-	nsErr      error
-	nsSelected int
-	nsFilter   filterState
-	nsAttrs    []eos.NamespaceAttr
-	nsAttrsErr error
+	directory        eos.Directory
+	nsLoaded         bool
+	nsLoading        bool
+	nsErr            error
+	nsSelected       int
+	nsFilter         filterState
+	nsRequestID      uint64
+	nsRequestedPath  string
+	nsAttrs          []eos.NamespaceAttr
+	nsAttrsErr       error
+	nsAttrsRequestID uint64
 
 	nsAttrsTargetPath  string
 	nsAttrsLoaded      bool
@@ -851,44 +898,52 @@ type model struct {
 	nsGoTo             namespaceGoTo
 	nsMkdir            namespaceMkdir
 
-	spaceStatus         []eos.SpaceStatusRecord
-	spaceStatusLoading  bool
-	spaceStatusErr      error
-	spaceStatusSelected int
-	spaceStatusTarget   string
+	spaceStatus          []eos.SpaceStatusRecord
+	spaceStatusLoading   bool
+	spaceStatusErr       error
+	spaceStatusSelected  int
+	spaceStatusTarget    string
+	spaceStatusRequestID uint64
 
-	ioShaping             []eos.IOShapingRecord
-	ioShapingPressure     []eos.IOShapingPressureRecord
-	ioShapingPolicies     []eos.IOShapingPolicyRecord
-	ioShapingConfig       eos.IOShapingConfig
-	ioShapingMode         eos.IOShapingMode
-	ioShapingLoading      bool
-	ioShapingErr          error
-	ioShapingConfigLoaded bool
-	ioShapingConfigErr    error
-	ioShapingSelected     int
-	ioShapingEdit         ioShapingPolicyEdit
+	ioShaping                []eos.IOShapingRecord
+	ioShapingPressure        []eos.IOShapingPressureRecord
+	ioShapingPolicies        []eos.IOShapingPolicyRecord
+	ioShapingConfig          eos.IOShapingConfig
+	ioShapingMode            eos.IOShapingMode
+	ioShapingLoading         bool
+	ioShapingErr             error
+	ioShapingConfigLoaded    bool
+	ioShapingConfigErr       error
+	ioShapingPoliciesErr     error
+	ioShapingPoliciesLoading bool
+	ioShapingConfigLoading   bool
+	ioShapingGeneration      uint64
+	ioShapingSelected        int
+	ioShapingEdit            ioShapingPolicyEdit
 
-	status string
+	status     string
+	helpActive bool
 
-	fstFilter   filterState
-	fstSort     sortState
-	fsFilter    filterState
-	fsSort      sortState
-	groupFilter filterState
-	groupSort   sortState
-	popup       filterPopup
-	nodeStatus  nodeStatusConfirm
-	edit        spaceStatusEdit
-	fsEdit      fsConfigStatusEdit
-	apollon     apollonDrainConfirm
-	qdbCoup     qdbCoupConfirm
-	qdbCoupDone qdbCoupResultPopup
-	groupDrain  groupDrainConfirm
-	alert       errorAlert
-	log         logOverlay
-	commandLog  commandPanel
-	splash      startupSplash
+	fstFilter            filterState
+	fstSort              sortState
+	fsFilter             filterState
+	fsSort               sortState
+	groupFilter          filterState
+	groupSort            sortState
+	popup                filterPopup
+	nodeStatus           nodeStatusConfirm
+	edit                 spaceStatusEdit
+	fsEdit               fsConfigStatusEdit
+	apollon              apollonDrainConfirm
+	qdbCoup              qdbCoupConfirm
+	qdbCoupDone          qdbCoupResultPopup
+	groupDrain           groupDrainConfirm
+	alert                errorAlert
+	log                  logOverlay
+	commandLog           commandPanel
+	logGeneration        uint64
+	commandLogGeneration uint64
+	splash               startupSplash
 
 	styles styles
 }

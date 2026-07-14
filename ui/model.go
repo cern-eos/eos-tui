@@ -14,7 +14,9 @@ import (
 )
 
 type ModelOptions struct {
-	IdleTimeout time.Duration
+	IdleTimeout        time.Duration
+	RefreshInterval    time.Duration
+	DisableAutoRefresh bool
 }
 
 func NewModel(client *eos.Client, endpoint, rootPath string) tea.Model {
@@ -22,6 +24,10 @@ func NewModel(client *eos.Client, endpoint, rootPath string) tea.Model {
 }
 
 func NewModelWithOptions(client *eos.Client, endpoint, rootPath string, opts ModelOptions) tea.Model {
+	refreshEvery := opts.RefreshInterval
+	if refreshEvery <= 0 {
+		refreshEvery = defaultRefreshInterval
+	}
 	input := textinput.New()
 	input.Prompt = "filter> "
 	input.CharLimit = 256
@@ -52,18 +58,35 @@ func NewModelWithOptions(client *eos.Client, endpoint, rootPath string, opts Mod
 		initialPath = "/eos"
 	}
 	now := time.Now()
+	ioGeneration := uint64(0)
+	if activeView == viewIOShaping {
+		ioGeneration = 1
+	}
+	// Generations are never zero in production. Zero remains available only to
+	// legacy unit messages; treating a real first request as a wildcard would
+	// allow an old response to win after a scope ABA transition.
+	vidGeneration := uint64(1)
+	ioPolicyLoading := activeView == viewIOShaping && ioShapingModeHasPolicies(eos.IOShapingApps)
+	ioConfigLoading := activeView == viewIOShaping
+	commandGeneration := uint64(0)
+	if commandLogVisible {
+		commandGeneration = 1
+	}
 
 	return model{
 		client:             client,
 		endpoint:           endpoint,
 		idleTimeout:        opts.IdleTimeout,
 		lastActivity:       now,
+		refreshInterval:    refreshEvery,
+		autoRefresh:        !opts.DisableAutoRefresh,
 		width:              120,
 		height:             32,
 		activeView:         activeView,
 		fstStatsLoading:    true,
 		fstsLoading:        true,
 		fileSystemsLoading: true,
+		mgmsLoading:        true,
 		spacesLoading:      true,
 		nsStatsLoading:     true,
 		inspectorLoading:   true,
@@ -76,28 +99,46 @@ func NewModelWithOptions(client *eos.Client, endpoint, rootPath string, opts Mod
 		directory: eos.Directory{
 			Path: cleanPath(initialPath),
 		},
-		status:               "Loading EOS state...",
-		fstColumnSelected:    int(fstFilterHost),
-		fsColumnSelected:     int(fsFilterHost),
-		groupsColumnSelected: int(groupFilterName),
-		fstSort:              sortState{column: int(fstSortNone)},
-		fsSort:               sortState{column: int(fsSortNone)},
-		spaceSort:            sortState{column: int(spaceSortNone)},
-		groupSort:            sortState{column: int(groupSortNone)},
-		fstFilter:            filterState{filters: map[int]string{}},
-		fsFilter:             filterState{filters: map[int]string{}},
-		nsFilter:             filterState{filters: map[int]string{}},
-		spaceFilter:          filterState{filters: map[int]string{}},
-		groupFilter:          filterState{filters: map[int]string{}},
-		accessFilter:         filterState{filters: map[int]string{}},
-		statsFilter:          filterState{filters: map[int]string{}},
+		nsRequestID:              1,
+		nsRequestedPath:          cleanPath(initialPath),
+		ioShapingGeneration:      ioGeneration,
+		vidGeneration:            vidGeneration,
+		nodeStatsGeneration:      1,
+		fstsGeneration:           1,
+		fileSystemsGeneration:    1,
+		mgmsGeneration:           1,
+		mgmVersionsGeneration:    1,
+		spacesGeneration:         1,
+		groupsGeneration:         1,
+		accessGeneration:         1,
+		namespaceStatsGeneration: 1,
+		inspectorGeneration:      1,
+		ioShapingPoliciesLoading: ioPolicyLoading,
+		ioShapingConfigLoading:   ioConfigLoading,
+		commandLogGeneration:     commandGeneration,
+		status:                   "Loading EOS state...",
+		fstColumnSelected:        int(fstFilterHost),
+		fsColumnSelected:         int(fsFilterHost),
+		groupsColumnSelected:     int(groupFilterName),
+		fstSort:                  sortState{column: int(fstSortNone)},
+		fsSort:                   sortState{column: int(fsSortNone)},
+		spaceSort:                sortState{column: int(spaceSortNone)},
+		groupSort:                sortState{column: int(groupSortNone)},
+		fstFilter:                filterState{filters: map[int]string{}},
+		fsFilter:                 filterState{filters: map[int]string{}},
+		nsFilter:                 filterState{filters: map[int]string{}},
+		spaceFilter:              filterState{filters: map[int]string{}},
+		groupFilter:              filterState{filters: map[int]string{}},
+		accessFilter:             filterState{filters: map[int]string{}},
+		statsFilter:              filterState{filters: map[int]string{}},
 		popup: filterPopup{
 			input: input,
 			table: popupTable,
 		},
 		commandLog: commandPanel{
-			active:  commandLogVisible,
-			loading: commandLogVisible,
+			active:   commandLogVisible,
+			loading:  commandLogVisible,
+			inFlight: commandLogVisible,
 		},
 		splash: startupSplash{
 			active: true,
@@ -107,36 +148,118 @@ func NewModelWithOptions(client *eos.Client, endpoint, rootPath string, opts Mod
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{checkEOSCmd(m.client), loadInfraCmd(m.client), tickCmd(), splashTickCmd()}
+	cmds := []tea.Cmd{checkEOSCmd(m.client), loadInfraCmd(m.client, m.infraGenerations()), tickCmd(m.refreshInterval), splashTickCmd()}
+	if m.idleTimeout > 0 {
+		cmds = append(cmds, idleTickCmd(m.idleTimeout))
+	}
 	switch m.activeView {
 	case viewNamespace:
-		cmds = append(cmds, loadDirectoryCmd(m.client, m.directory.Path))
+		cmds = append(cmds, loadDirectoryCmd(m.client, m.nsRequestedPath, m.nsRequestID))
 	case viewGroups:
-		cmds = append(cmds, loadGroupsCmd(m.client))
+		cmds = append(cmds, loadGroupsCmd(m.client, m.groupsGeneration))
 	case viewIOShaping:
-		cmds = append(cmds, loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode), ioShapingTickCmd(), ioShapingPolicyTickCmd())
+		cmds = append(cmds,
+			loadIOShapingViewCmd(m.client, m.ioShapingMode, m.ioShapingGeneration),
+			loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode, m.ioShapingGeneration),
+		)
 	case viewVID:
-		cmds = append(cmds, loadVIDCmd(m.client, m.vidMode))
+		cmds = append(cmds, loadVIDCmd(m.client, m.vidMode, m.vidGeneration))
 	case viewAccess:
-		cmds = append(cmds, loadAccessCmd(m.client))
+		cmds = append(cmds, loadAccessCmd(m.client, m.accessGeneration))
 	}
 	if m.commandLog.active {
-		cmds = append(cmds, loadCommandHistoryCmd(m.client), commandLogTickCmd())
+		cmds = append(cmds, loadCommandHistoryCmd(m.client, m.commandLogGeneration), commandLogTickCmd(m.commandLogGeneration))
 	}
 	return tea.Batch(cmds...)
 }
 
+func (m model) infraGenerations() infraGenerations {
+	return infraGenerations{
+		nodeStats:      m.nodeStatsGeneration,
+		fsts:           m.fstsGeneration,
+		mgms:           m.mgmsGeneration,
+		fileSystems:    m.fileSystemsGeneration,
+		spaces:         m.spacesGeneration,
+		namespaceStats: m.namespaceStatsGeneration,
+		inspector:      m.inspectorGeneration,
+	}
+}
+
+func bumpGeneration(value *uint64) uint64 {
+	*value++
+	if *value == 0 {
+		*value = 1
+	}
+	return *value
+}
+
+func (m *model) startNodeStatsLoad() tea.Cmd {
+	m.fstStatsLoading = true
+	return loadNodeStatsCmd(m.client, bumpGeneration(&m.nodeStatsGeneration))
+}
+
+func (m *model) startFSTLoad() tea.Cmd {
+	m.fstsLoading = true
+	return loadFSTsCmd(m.client, bumpGeneration(&m.fstsGeneration))
+}
+
+func (m *model) startFileSystemsLoad() tea.Cmd {
+	m.fileSystemsLoading = true
+	return loadFileSystemsCmd(m.client, bumpGeneration(&m.fileSystemsGeneration))
+}
+
+func (m *model) startMGMLoad() tea.Cmd {
+	m.mgmsLoading = true
+	return loadMGMsCmd(m.client, bumpGeneration(&m.mgmsGeneration))
+}
+
+func (m *model) startMGMVersionsReload() tea.Cmd {
+	m.mgmVersionsLoading = true
+	return reloadMGMVersionsCmd(m.client, bumpGeneration(&m.mgmVersionsGeneration))
+}
+
+func (m *model) startSpacesLoad() tea.Cmd {
+	m.spacesLoading = true
+	return loadSpacesCmd(m.client, bumpGeneration(&m.spacesGeneration))
+}
+
+func (m *model) startGroupsLoad() tea.Cmd {
+	m.groupsLoading = true
+	return loadGroupsCmd(m.client, bumpGeneration(&m.groupsGeneration))
+}
+
+func (m *model) startAccessLoad() tea.Cmd {
+	m.accessLoading = true
+	return loadAccessCmd(m.client, bumpGeneration(&m.accessGeneration))
+}
+
+func (m *model) startNamespaceStatsLoad() tea.Cmd {
+	m.nsStatsLoading = true
+	return loadNamespaceStatsCmd(m.client, bumpGeneration(&m.namespaceStatsGeneration))
+}
+
+func (m *model) startInspectorLoad() tea.Cmd {
+	m.inspectorLoading = true
+	return loadInspectorCmd(m.client, bumpGeneration(&m.inspectorGeneration))
+}
+
 func (m model) toggleCommandLog() (tea.Model, tea.Cmd) {
+	m.commandLogGeneration++
 	m.commandLog.active = !m.commandLog.active
 	m.persistUIState()
 	if !m.commandLog.active {
 		m.commandLog.loading = false
+		m.commandLog.inFlight = false
 		return m, nil
 	}
 
 	m.commandLog.loading = true
+	m.commandLog.inFlight = true
 	m.commandLog.err = nil
-	return m, tea.Batch(loadCommandHistoryCmd(m.client), commandLogTickCmd())
+	return m, tea.Batch(
+		loadCommandHistoryCmd(m.client, m.commandLogGeneration),
+		commandLogTickCmd(m.commandLogGeneration),
+	)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -158,8 +281,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.ClearScreen
 	case tea.KeyMsg:
+		if m.helpActive {
+			switch msg.String() {
+			case "?", "esc", "q", "ctrl+c", "enter":
+				m.helpActive = false
+			}
+			return m, nil
+		}
+		if m.blockingOverlayNeedsResize() {
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			if msg.String() != "esc" {
+				m.status = "Resize the terminal to continue, or press esc to cancel"
+				return m, nil
+			}
+		}
 		// Log overlay intercepts all keys when active.
 		if m.log.active {
+			if !m.log.filtering {
+				switch msg.String() {
+				case "?":
+					m.helpActive = true
+					return m, nil
+				case "P":
+					m.autoRefresh = !m.autoRefresh
+					if m.autoRefresh {
+						m.status = fmt.Sprintf("Automatic refresh enabled (%s)", m.refreshInterval)
+					} else {
+						m.status = "Automatic refresh paused"
+					}
+					return m, nil
+				}
+			}
 			return m.updateLogKeys(msg)
 		}
 		if m.alert.active {
@@ -213,6 +367,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+		case "?":
+			m.helpActive = true
+			return m, nil
+		case "P":
+			m.autoRefresh = !m.autoRefresh
+			if m.autoRefresh {
+				m.status = fmt.Sprintf("Automatic refresh enabled (%s)", m.refreshInterval)
+			} else {
+				m.status = "Automatic refresh paused"
+			}
+			return m, nil
 		case "esc":
 			if m.activeView == viewSpaces && m.spaceStatusActive {
 				m.spaceStatusActive = false
@@ -284,7 +449,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "L":
 			return m.toggleCommandLog()
 		case "l":
-			return m.openLogOverlay()
+			if _, ok := m.logTargetsForView(); ok {
+				return m.openLogOverlay()
+			}
 		case "s":
 			if m.activeView == viewAccess {
 				break
@@ -326,36 +493,52 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateAccessKeys(msg)
 		}
 	case mgmsLoadedMsg:
+		if msg.generation != 0 && msg.generation != m.mgmsGeneration {
+			return m, nil
+		}
+		selectedHost, keepSelectedHost := m.selectedTopologyHost()
 		m.mgmsLoading = false
-		m.mgms = mergeMGMVersionData(msg.mgms, m.mgms)
 		m.mgmsErr = msg.err
-		m.mgmSelected = clampIndex(m.mgmSelected, len(m.topologySelectableRows()))
-		if msg.err == nil && !m.mgmVersionsLoading {
+		if msg.err == nil {
+			m.mgms = mergeMGMVersionData(msg.mgms, m.mgms)
+			m.mgmSelected = restoreSelection(m.topologySelectableRows(), m.mgmSelected, keepSelectedHost, func(row topologyHostRow) bool {
+				return sameTopologyHost(row, selectedHost)
+			})
+			m.mgmVersionsLoaded = !hasMissingMGMVersions(m.mgms)
+			m.markRefreshed("MGM/QDB topology updated", viewMGM, viewQDB)
+		}
+		versionsDue := m.mgmVersionsUpdated.IsZero() || time.Since(m.mgmVersionsUpdated) >= mgmVersionRefreshInterval
+		if msg.err == nil && !m.mgmVersionsLoading && versionsDue {
 			probeTargets := mgmVersionProbeTargets(m.mgms)
 			if len(probeTargets) > 0 {
 				m.mgmVersionsLoaded = false
 				m.mgmVersionsLoading = true
-				return m, loadMGMVersionsCmd(m.client, probeTargets)
+				generation := bumpGeneration(&m.mgmVersionsGeneration)
+				return m, loadMGMVersionsCmd(m.client, probeTargets, generation)
 			}
-		}
-		if msg.err == nil {
-			m.mgmVersionsLoaded = !hasMissingMGMVersions(m.mgms)
 		}
 		return m, nil
 
 	case mgmVersionsLoadedMsg:
+		if msg.generation != 0 && msg.generation != m.mgmVersionsGeneration {
+			return m, nil
+		}
 		m.mgmVersionsLoading = false
 		m.mgmVersionsErr = msg.err
+		m.mgmVersionsUpdated = time.Now()
 		m.mgms = applyMGMVersions(m.mgms, msg.mgmVersions, msg.qdbVersions)
 		m.mgmVersionsLoaded = !hasMissingMGMVersions(m.mgms)
 		if msg.err != nil {
-			m.status = fmt.Sprintf("Loaded MGM/QDB topology with partial versions: %v", msg.err)
+			m.setStatusForViews(fmt.Sprintf("Loaded MGM/QDB topology with partial versions: %v", msg.err), viewMGM, viewQDB)
 		} else if len(msg.mgmVersions) > 0 || len(msg.qdbVersions) > 0 {
-			m.status = "Loaded MGM/QDB versions"
+			m.markRefreshed("MGM/QDB versions updated", viewMGM, viewQDB)
 		}
 		return m, nil
 
 	case infraLoadedMsg:
+		selectedNode, keepSelectedNode := m.selectedNode()
+		selectedFS, keepSelectedFS := m.selectedFileSystem()
+		selectedHost, keepSelectedHost := m.selectedTopologyHost()
 		m.fstStatsLoading = false
 		m.fstsLoading = false
 		m.mgmsLoading = false
@@ -372,17 +555,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fstsErr = msg.fstsErr
 		if msg.fstsErr == nil {
 			m.fsts = msg.fsts
-			m.fstSelected = clampIndex(m.fstSelected, len(m.visibleFSTs()))
+			m.fstSelected = restoreSelection(m.visibleFSTs(), m.fstSelected, keepSelectedNode, func(node eos.FstRecord) bool {
+				return node.Host == selectedNode.Host && node.Port == selectedNode.Port
+			})
 		}
 		m.mgmsErr = msg.mgmsErr
 		if msg.mgmsErr == nil {
 			m.mgms = msg.mgms
-			m.mgmSelected = clampIndex(m.mgmSelected, len(m.topologySelectableRows()))
+			m.mgmSelected = restoreSelection(m.topologySelectableRows(), m.mgmSelected, keepSelectedHost, func(row topologyHostRow) bool {
+				return sameTopologyHost(row, selectedHost)
+			})
 		}
 		m.fileSystemsErr = msg.fsErr
 		if msg.fsErr == nil {
 			m.fileSystems = msg.fs
-			m.fsSelected = clampIndex(m.fsSelected, len(m.visibleFileSystems()))
+			m.fsSelected = restoreSelection(m.visibleFileSystems(), m.fsSelected, keepSelectedFS, func(fs eos.FileSystemRecord) bool {
+				return fs.ID == selectedFS.ID
+			})
 		}
 		// Legacy single-error path (early-return failures).
 		if msg.err != nil {
@@ -398,33 +587,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.fileSystemsErr == nil {
 				m.fileSystemsErr = msg.err
 			}
-			m.status = fmt.Sprintf("Infrastructure refresh failed: %v", msg.err)
+			m.setStatusForViews(fmt.Sprintf("Infrastructure refresh failed: %v", msg.err), viewNamespaceStats, viewFST, viewFileSystems, viewMGM, viewQDB)
 		} else {
-			m.status = fmt.Sprintf("Connected to %s", m.endpoint)
+			m.markRefreshed(fmt.Sprintf("Connected to %s", m.endpoint), viewNamespaceStats, viewFST, viewFileSystems, viewMGM, viewQDB)
 		}
 	case eosVersionLoadedMsg:
 		if msg.version != "" {
 			m.eosVersion = msg.version
 		}
 	case nodeStatsLoadedMsg:
+		if msg.generation != 0 && msg.generation != m.nodeStatsGeneration {
+			return m, nil
+		}
 		m.fstStatsLoading = false
 		m.nodeStatsErr = msg.err
 		if msg.err != nil {
-			m.status = fmt.Sprintf("Cluster summary refresh failed: %v", msg.err)
+			m.setStatusForViews(fmt.Sprintf("Cluster summary refresh failed: %v", msg.err), viewNamespaceStats)
 		} else {
 			m.nodeStats = msg.stats
 			m.nodeStats.State = m.computeClusterHealth()
-			m.status = fmt.Sprintf("Connected to %s", m.endpoint)
+			m.markRefreshed("Cluster summary updated", viewNamespaceStats)
 		}
 	case fstsLoadedMsg:
+		if msg.generation != 0 && msg.generation != m.fstsGeneration {
+			return m, nil
+		}
+		selectedNode, keepSelectedNode := m.selectedNode()
 		m.fstsLoading = false
 		m.fstsErr = msg.err
 		if msg.err != nil {
-			m.status = fmt.Sprintf("Node list refresh failed: %v", msg.err)
+			m.setStatusForViews(fmt.Sprintf("Node list refresh failed: %v", msg.err), viewFST, viewNamespaceStats)
 		} else {
 			m.fsts = msg.fsts
-			m.fstSelected = clampIndex(m.fstSelected, len(m.visibleFSTs()))
-			m.status = fmt.Sprintf("Connected to %s", m.endpoint)
+			m.fstSelected = restoreSelection(m.visibleFSTs(), m.fstSelected, keepSelectedNode, func(node eos.FstRecord) bool {
+				return node.Host == selectedNode.Host && node.Port == selectedNode.Port
+			})
+			m.markRefreshed("FST nodes updated", viewFST, viewNamespaceStats)
 		}
 		m.nodeStats.State = m.computeClusterHealth()
 	case nodeStatusResultMsg:
@@ -436,61 +634,89 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = fmt.Sprintf("Node %s set %s", msg.hostPort, msg.status)
-		m.fstsLoading = true
 		m.fstsErr = nil
-		return m, tea.Batch(loadFSTsCmd(m.client), loadFileSystemsCmd(m.client))
+		m.fileSystemsErr = nil
+		return m, tea.Batch(m.startFSTLoad(), m.startFileSystemsLoad())
 	case fileSystemsLoadedMsg:
+		if msg.generation != 0 && msg.generation != m.fileSystemsGeneration {
+			return m, nil
+		}
+		selectedFS, keepSelectedFS := m.selectedFileSystem()
 		m.fileSystemsLoading = false
 		m.fileSystemsErr = msg.err
 		if msg.err != nil {
-			m.status = fmt.Sprintf("Filesystem refresh failed: %v", msg.err)
+			m.setStatusForViews(fmt.Sprintf("Filesystem refresh failed: %v", msg.err), viewFileSystems, viewNamespaceStats)
 		} else {
 			m.fileSystems = msg.fs
-			m.fsSelected = clampIndex(m.fsSelected, len(m.visibleFileSystems()))
-			m.status = fmt.Sprintf("Connected to %s", m.endpoint)
+			m.fsSelected = restoreSelection(m.visibleFileSystems(), m.fsSelected, keepSelectedFS, func(fs eos.FileSystemRecord) bool {
+				return fs.ID == selectedFS.ID
+			})
+			m.markRefreshed("Filesystems updated", viewFileSystems, viewNamespaceStats)
 		}
 		m.nodeStats.State = m.computeClusterHealth()
 	case spacesLoadedMsg:
+		if msg.generation != 0 && msg.generation != m.spacesGeneration {
+			return m, nil
+		}
+		selectedSpace, keepSelectedSpace := m.selectedSpace()
 		m.spacesLoading = false
 		m.spacesErr = msg.err
 		if msg.err != nil {
-			m.status = fmt.Sprintf("Spaces refresh failed: %v", msg.err)
+			m.setStatusForViews(fmt.Sprintf("Spaces refresh failed: %v", msg.err), viewSpaces)
 		} else {
 			m.spaces = msg.spaces
-			m.spacesSelected = clampIndex(m.spacesSelected, len(m.visibleSpaces()))
+			m.spacesSelected = restoreSelection(m.visibleSpaces(), m.spacesSelected, keepSelectedSpace, func(space eos.SpaceRecord) bool {
+				return space.Name == selectedSpace.Name
+			})
+			m.markRefreshed("Spaces updated", viewSpaces)
 		}
 	case groupsLoadedMsg:
+		if msg.generation != 0 && msg.generation != m.groupsGeneration {
+			return m, nil
+		}
+		selectedGroup, keepSelectedGroup := m.selectedGroup()
 		m.groupsLoading = false
 		m.groupsErr = msg.err
 		if msg.err != nil {
-			m.status = fmt.Sprintf("Groups refresh failed: %v", msg.err)
+			m.setStatusForViews(fmt.Sprintf("Groups refresh failed: %v", msg.err), viewGroups)
 		} else {
 			m.groups = msg.groups
-			m.groupsSelected = clampIndex(m.groupsSelected, len(m.visibleGroups()))
-			m.status = fmt.Sprintf("Connected to %s", m.endpoint)
+			m.groupsSelected = restoreSelection(m.visibleGroups(), m.groupsSelected, keepSelectedGroup, func(group eos.GroupRecord) bool {
+				return group.Name == selectedGroup.Name
+			})
+			m.markRefreshed("Groups updated", viewGroups)
 		}
 	case vidLoadedMsg:
-		if msg.mode != m.vidMode {
+		if msg.mode != m.vidMode || msg.generation != m.vidGeneration {
 			return m, nil
 		}
+		selectedVID, keepSelectedVID := m.selectedVIDRecord()
 		m.vidLoading = false
 		m.vidErr = msg.err
 		if msg.err != nil {
-			m.status = fmt.Sprintf("VID refresh failed: %v", msg.err)
+			m.setStatusForViews(fmt.Sprintf("VID refresh failed: %v", msg.err), viewVID)
 		} else {
 			m.vidRecords = msg.records
-			m.vidSelected = clampIndex(m.vidSelected, len(m.vidRecords))
-			m.status = fmt.Sprintf("Loaded VID mappings via eos vid ls %s", strings.TrimSpace(msg.mode.flag()))
+			m.vidSelected = restoreSelection(m.vidRecords, m.vidSelected, keepSelectedVID, func(record eos.VIDRecord) bool {
+				return record.Key == selectedVID.Key && record.Value == selectedVID.Value
+			})
+			m.markRefreshed(fmt.Sprintf("Loaded VID mappings via eos vid ls %s", strings.TrimSpace(msg.mode.flag())), viewVID)
 		}
 	case accessLoadedMsg:
+		if msg.generation != 0 && msg.generation != m.accessGeneration {
+			return m, nil
+		}
+		selectedAccess, keepSelectedAccess := m.selectedAccessRecord()
 		m.accessLoading = false
 		m.accessErr = msg.err
 		if msg.err != nil {
-			m.status = fmt.Sprintf("Access refresh failed: %v", msg.err)
+			m.setStatusForViews(fmt.Sprintf("Access refresh failed: %v", msg.err), viewAccess)
 		} else {
 			m.accessRecords = msg.records
-			m.accessSelected = clampIndex(m.accessSelected, len(m.visibleAccessRecords()))
-			m.status = "Loaded access rules via eos access ls -m"
+			m.accessSelected = restoreSelection(m.visibleAccessRecords(), m.accessSelected, keepSelectedAccess, func(record eos.AccessRecord) bool {
+				return record.RawKey == selectedAccess.RawKey && record.Value == selectedAccess.Value
+			})
+			m.markRefreshed("Loaded access rules via eos access ls -m", viewAccess)
 		}
 	case accessActionResultMsg:
 		if msg.err != nil {
@@ -501,45 +727,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = fmt.Sprintf("Applied access action: %s", msg.target)
-		m.accessLoading = true
 		m.accessErr = nil
-		return m, loadAccessCmd(m.client)
+		return m, m.startAccessLoad()
 	case namespaceStatsLoadedMsg:
+		if msg.generation != 0 && msg.generation != m.namespaceStatsGeneration {
+			return m, nil
+		}
 		m.nsStatsLoading = false
 		m.nsStatsErr = msg.err
 		if msg.err != nil {
-			m.status = fmt.Sprintf("Namespace stats refresh failed: %v", msg.err)
+			m.setStatusForViews(fmt.Sprintf("Namespace stats refresh failed: %v", msg.err), viewNamespaceStats)
 		} else {
 			m.namespaceStats = msg.stats
-			m.status = fmt.Sprintf("Connected to %s", m.endpoint)
+			m.markRefreshed("Namespace statistics updated", viewNamespaceStats)
 		}
 	case inspectorLoadedMsg:
+		if msg.generation != 0 && msg.generation != m.inspectorGeneration {
+			return m, nil
+		}
 		m.inspectorLoading = false
 		m.inspectorErr = msg.err
+		m.inspectorUpdated = time.Now()
 		if msg.err != nil {
-			m.status = fmt.Sprintf("Inspector refresh failed: %v", msg.err)
+			if inspectorErrorSummary(msg.err) == "disabled" {
+				m.setStatusForViews("Inspector is disabled; core statistics remain available", viewNamespaceStats)
+			} else {
+				m.setStatusForViews(fmt.Sprintf("Inspector refresh failed: %v", msg.err), viewNamespaceStats)
+			}
 		} else {
 			m.inspectorStats = msg.stats
-			m.status = fmt.Sprintf("Connected to %s", m.endpoint)
+			m.markRefreshed("Inspector statistics updated", viewNamespaceStats)
 		}
 	case directoryLoadedMsg:
+		if msg.requestID != 0 && (msg.requestID != m.nsRequestID || cleanPath(msg.path) != m.nsRequestedPath) {
+			return m, nil
+		}
+		selectedEntry, keepSelectedEntry := m.selectedNamespaceEntry()
 		m.nsLoading = false
 		m.nsErr = msg.err
 		if msg.err != nil {
-			m.status = fmt.Sprintf("Namespace refresh failed: %v", msg.err)
+			m.setStatusForViews(fmt.Sprintf("Namespace refresh failed: %v", msg.err), viewNamespace)
 		} else {
 			m.nsLoaded = true
 			m.directory = msg.directory
-			if m.nsSelected >= len(m.directory.Entries) {
-				m.nsSelected = max(0, len(m.directory.Entries)-1)
-			}
+			m.nsRequestedPath = cleanPath(msg.directory.Path)
+			m.nsSelected = restoreSelection(m.visibleNamespaceEntries(), m.nsSelected, keepSelectedEntry, func(entry eos.Entry) bool {
+				return entry.Path == selectedEntry.Path
+			})
 			m = m.rememberNamespaceDetailContent()
-			m.status = fmt.Sprintf("Browsing namespace %s", m.directory.Path)
+			m.markRefreshed(fmt.Sprintf("Browsing namespace %s", m.directory.Path), viewNamespace)
 			m.persistUIState()
 			return m.startNamespaceAttrLoad(true)
 		}
 	case namespaceAttrsLoadedMsg:
-		if msg.path != m.nsAttrsTargetPath {
+		if msg.path != m.nsAttrsTargetPath || (msg.requestID != 0 && msg.requestID != m.nsAttrsRequestID) {
 			return m, nil
 		}
 		m.nsAttrsLoading = false
@@ -550,7 +791,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m = m.rememberNamespaceDetailContent()
 	case namespaceAttrSetResultMsg:
-		m.nsAttrEdit.active = false
 		if msg.err != nil {
 			m.alert = errorAlert{
 				active:  true,
@@ -565,7 +805,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.startNamespaceAttrLoad(true)
 	case namespaceMkdirResultMsg:
-		m.nsMkdir.active = false
 		if msg.err != nil {
 			m.alert = errorAlert{
 				active:  true,
@@ -577,40 +816,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.nsSelected = 0
 		m.nsLoading = true
 		m.status = fmt.Sprintf("Created directory %s", msg.path)
-		return m, loadDirectoryCmd(m.client, m.directory.Path)
+		return m.requestDirectory(m.directory.Path)
 	case spaceStatusLoadedMsg:
-		if msg.space != m.spaceStatusTarget {
+		if msg.space != m.spaceStatusTarget || (msg.requestID != 0 && msg.requestID != m.spaceStatusRequestID) {
 			return m, nil
 		}
+		selectedStatus, keepSelectedStatus := m.selectedSpaceStatusRecord()
 		m.spaceStatusLoading = false
 		m.spaceStatusErr = msg.err
 		if msg.err != nil {
-			m.status = fmt.Sprintf("Space %s status refresh failed: %v", msg.space, msg.err)
+			m.setStatusForViews(fmt.Sprintf("Space %s status refresh failed: %v", msg.space, msg.err), viewSpaces, viewSpaceStatus)
 		} else {
 			m.spaceStatus = msg.records
-			m.spaceStatusSelected = clampIndex(m.spaceStatusSelected, len(m.spaceStatus))
-			m.status = fmt.Sprintf("Loaded space status for %s", msg.space)
+			m.spaceStatusSelected = restoreSelection(m.spaceStatus, m.spaceStatusSelected, keepSelectedStatus, func(record eos.SpaceStatusRecord) bool {
+				return record.Key == selectedStatus.Key
+			})
+			m.markRefreshed(fmt.Sprintf("Loaded space status for %s", msg.space), viewSpaces)
 		}
 	case spaceConfigResultMsg:
-		m.edit.active = false
 		if msg.err != nil {
-			m.status = m.styles.error.Render(fmt.Sprintf("Space config failed: %v", msg.err))
+			m.status = fmt.Sprintf("Space config failed: %v", msg.err)
 		} else {
 			m.status = fmt.Sprintf("Space %s configuration updated successfully", msg.space)
-			return m, loadSpaceStatusCmd(m.client, msg.space)
+			if msg.space != m.spaceStatusTarget {
+				// The operator has moved to another space while this write was
+				// running. Keep the success notification, but never switch the
+				// underlying editor/list back to the old context.
+				return m, nil
+			}
+			return m.requestSpaceStatus(msg.space)
 		}
 	case groupSetResultMsg:
-		m.groupDrain.active = false
 		if msg.batch {
 			if len(msg.failed) > 0 {
 				m.alert = errorAlert{
 					active:  true,
 					message: fmt.Sprintf("group set partially failed (%d/%d failed)\n\n%s", len(msg.failed), msg.count, strings.Join(msg.failed, "\n")),
 				}
-				return m, loadGroupsCmd(m.client)
+				return m, m.startGroupsLoad()
 			}
 			m.status = fmt.Sprintf("Set %d groups to %s", msg.count, msg.status)
-			return m, loadGroupsCmd(m.client)
+			return m, m.startGroupsLoad()
 		}
 		if msg.err != nil {
 			m.alert = errorAlert{
@@ -620,29 +866,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = fmt.Sprintf("Group %s set to %s", msg.group, msg.status)
-		return m, loadGroupsCmd(m.client)
+		return m, m.startGroupsLoad()
 	case fsConfigStatusResultMsg:
-		m.fsEdit.active = false
 		if msg.err != nil {
 			m.alert = errorAlert{
 				active:  true,
 				message: fmt.Sprintf("fs config failed: %v", msg.err),
 			}
 		} else {
-			m.status = fmt.Sprintf("Filesystem %d configstatus updated", m.fsEdit.fsID)
-			return m, loadFileSystemsCmd(m.client)
+			m.status = fmt.Sprintf("Filesystem %d configstatus updated to %s", msg.fsID, msg.value)
+			return m, m.startFileSystemsLoad()
 		}
 	case fsConfigStatusBatchResultMsg:
-		m.fsEdit.active = false
 		if len(msg.failed) > 0 {
 			m.alert = errorAlert{
 				active:  true,
 				message: fmt.Sprintf("filesystem configstatus partially failed (%d/%d failed)\n\n%s", len(msg.failed), msg.attempted, strings.Join(msg.failed, "\n")),
 			}
-			return m, loadFileSystemsCmd(m.client)
+			return m, m.startFileSystemsLoad()
 		}
 		m.status = fmt.Sprintf("Updated configstatus=%s on %d filesystems", msg.value, msg.attempted)
-		return m, loadFileSystemsCmd(m.client)
+		return m, m.startFileSystemsLoad()
 	case apollonDrainResultMsg:
 		if msg.err != nil {
 			detail := fmt.Sprintf("Apollon drain failed for filesystem %d on %s: %v", msg.fsID, msg.instance, msg.err)
@@ -656,7 +900,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = fmt.Sprintf("Apollon drain started for filesystem %d on %s", msg.fsID, msg.instance)
-		return m, loadFileSystemsCmd(m.client)
+		return m, m.startFileSystemsLoad()
 	case qdbCoupResultMsg:
 		m.qdbCoupDone = qdbCoupResultPopup{
 			active: true,
@@ -674,25 +918,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.mgmsLoading = true
 		m.mgmVersionsLoading = true
+		mgmsGeneration := bumpGeneration(&m.mgmsGeneration)
+		versionsGeneration := bumpGeneration(&m.mgmVersionsGeneration)
 		return m, tea.Batch(
-			delayedLoadMGMsCmd(m.client, qdbCoupRefreshDelay),
-			delayedReloadMGMVersionsCmd(m.client, qdbCoupRefreshDelay),
+			delayedLoadMGMsCmd(m.client, qdbCoupRefreshDelay, mgmsGeneration),
+			delayedReloadMGMVersionsCmd(m.client, qdbCoupRefreshDelay, versionsGeneration),
 		)
 	case ioShapingLoadedMsg:
-		if msg.mode != m.ioShapingMode {
+		if msg.mode != m.ioShapingMode || (msg.generation != 0 && msg.generation != m.ioShapingGeneration) {
 			return m, nil
 		}
+		selectedRow, keepSelectedRow := m.selectedIOShapingRow()
 		m.ioShapingLoading = false
 		if msg.err != nil {
 			m.ioShapingErr = msg.err
 		} else {
 			m.ioShaping = msg.records
 			m.ioShapingErr = nil
-			m.ioShapingSelected = clampIndex(m.ioShapingSelected, len(m.ioShapingMergedRows()))
+			m.ioShapingSelected = restoreSelection(m.ioShapingMergedRows(), m.ioShapingSelected, keepSelectedRow, func(row ioShapingMergedRow) bool {
+				return row.id == selectedRow.id
+			})
+			m.markRefreshed("IO traffic updated", viewIOShaping)
 		}
 	case ioShapingPressureLoadedMsg:
-		if msg.mode != m.ioShapingMode {
+		if msg.mode != m.ioShapingMode || (msg.generation != 0 && msg.generation != m.ioShapingGeneration) {
 			return m, nil
+		}
+		pressureRows := m.sortedIOShapingPressure()
+		var selectedPressure eos.IOShapingPressureRecord
+		keepSelectedPressure := m.ioShapingSelected >= 0 && m.ioShapingSelected < len(pressureRows)
+		if keepSelectedPressure {
+			selectedPressure = pressureRows[m.ioShapingSelected]
 		}
 		m.ioShapingLoading = false
 		if msg.err != nil {
@@ -700,14 +956,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.ioShapingPressure = msg.records
 			m.ioShapingErr = nil
-			m.ioShapingSelected = clampIndex(m.ioShapingSelected, len(m.ioShapingPressure))
+			m.ioShapingSelected = restoreSelection(m.sortedIOShapingPressure(), m.ioShapingSelected, keepSelectedPressure, func(record eos.IOShapingPressureRecord) bool {
+				return record.App == selectedPressure.App && record.NodeID == selectedPressure.NodeID
+			})
+			m.markRefreshed("IO pressure updated", viewIOShaping)
 		}
 	case ioShapingPoliciesLoadedMsg:
+		if msg.generation != 0 && msg.generation != m.ioShapingGeneration {
+			return m, nil
+		}
+		selectedRow, keepSelectedRow := m.selectedIOShapingRow()
+		m.ioShapingPoliciesLoading = false
+		m.ioShapingPoliciesErr = msg.err
 		if msg.err == nil {
 			m.ioShapingPolicies = msg.records
-			m.ioShapingSelected = clampIndex(m.ioShapingSelected, len(m.ioShapingMergedRows()))
+			m.ioShapingSelected = restoreSelection(m.ioShapingMergedRows(), m.ioShapingSelected, keepSelectedRow, func(row ioShapingMergedRow) bool {
+				return row.id == selectedRow.id
+			})
 		}
 	case ioShapingConfigLoadedMsg:
+		if msg.generation != 0 && msg.generation != m.ioShapingGeneration {
+			return m, nil
+		}
+		m.ioShapingConfigLoading = false
 		m.ioShapingConfigErr = msg.err
 		if msg.err == nil {
 			m.ioShapingConfig = msg.config
@@ -715,6 +986,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case ioShapingPolicyResultMsg:
 		if msg.err != nil {
+			m.ioShapingLoading = false
 			m.alert = errorAlert{
 				active:  true,
 				message: fmt.Sprintf("io shaping policy %s failed: %v", msg.op, msg.err),
@@ -726,14 +998,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = fmt.Sprintf("Updated IO shaping policy for %s", msg.id)
 		}
-		return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
+		m.ioShapingLoading = true
+		m.ioShapingGeneration++
+		m.markIOShapingPolicyLoading()
+		return m, tea.Batch(
+			loadIOShapingViewCmd(m.client, m.ioShapingMode, m.ioShapingGeneration),
+			loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode, m.ioShapingGeneration),
+		)
 	case ioShapingLimitsToggleResultMsg:
 		if msg.err != nil {
+			m.ioShapingConfigLoading = true
+			m.ioShapingGeneration++
 			m.alert = errorAlert{
 				active:  true,
 				message: fmt.Sprintf("io shaping controller limits toggle failed: %v", msg.err),
 			}
-			return m, loadIOShapingConfigCmd(m.client)
+			return m, loadIOShapingConfigCmd(m.client, m.ioShapingGeneration)
 		}
 		m.ioShapingConfig.LimitsEnabled = msg.enabled
 		m.ioShapingConfigLoaded = true
@@ -742,18 +1022,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = "Disabled IO shaping controller limits"
 		}
-		return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
-	case ioShapingTickMsg:
-		if m.activeView == viewIOShaping && !m.ioShapingLoading {
-			m.ioShapingLoading = true
-			return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), ioShapingTickCmd())
-		} else if m.activeView == viewIOShaping {
-			return m, ioShapingTickCmd()
-		}
-	case ioShapingPolicyTickMsg:
-		if m.activeView == viewIOShaping {
-			return m, tea.Batch(loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode), ioShapingPolicyTickCmd())
-		}
+		m.ioShapingLoading = true
+		m.ioShapingGeneration++
+		m.markIOShapingPolicyLoading()
+		return m, tea.Batch(
+			loadIOShapingViewCmd(m.client, m.ioShapingMode, m.ioShapingGeneration),
+			loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode, m.ioShapingGeneration),
+		)
 	case eosCheckResultMsg:
 		if msg.err != nil {
 			hint := "Make sure EOS is installed and available in PATH."
@@ -772,10 +1047,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case logLoadedMsg:
-		if m.log.active && msg.filePath != "" && msg.filePath != m.logSourceLabel() {
+		if !m.log.active || (msg.generation != 0 && msg.generation != m.logGeneration) {
+			return m, nil
+		}
+		if msg.filePath != "" && msg.filePath != m.logSourceLabel() {
 			return m, nil
 		}
 		m.log.loading = false
+		m.log.inFlight = false
 		m.log.err = msg.err
 		m.log.notice = msg.notice
 		if msg.err == nil {
@@ -792,21 +1071,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case logTickMsg:
+		if msg.generation != m.logGeneration {
+			return m, nil
+		}
 		if m.log.active && m.log.tailing {
-			return m, tea.Batch(loadLogCmd(m.client, m.currentLogTarget()), logTickCmd())
+			if m.log.inFlight {
+				return m, logTickCmd(m.logGeneration)
+			}
+			m.log.inFlight = true
+			return m, tea.Batch(
+				loadLogCmd(m.client, m.currentLogTarget(), m.logGeneration),
+				logTickCmd(m.logGeneration),
+			)
 		}
 	case commandHistoryLoadedMsg:
+		if msg.generation != 0 && msg.generation != m.commandLogGeneration {
+			return m, nil
+		}
 		m.commandLog.loading = false
+		m.commandLog.inFlight = false
 		m.commandLog.filePath = msg.filePath
 		m.commandLog.err = msg.err
 		if msg.err == nil {
 			m.commandLog.lines = msg.lines
 		}
 	case commandLogTickMsg:
+		if msg.generation != 0 && msg.generation != m.commandLogGeneration {
+			return m, nil
+		}
 		if m.commandLog.active {
-			return m, tea.Batch(loadCommandHistoryCmd(m.client), commandLogTickCmd())
+			if m.commandLog.inFlight {
+				return m, commandLogTickCmd(m.commandLogGeneration)
+			}
+			m.commandLog.inFlight = true
+			return m, tea.Batch(
+				loadCommandHistoryCmd(m.client, m.commandLogGeneration),
+				commandLogTickCmd(m.commandLogGeneration),
+			)
 		}
 	case shellExitedMsg:
+		m.lastActivity = time.Now()
 		if msg.err != nil {
 			m.status = fmt.Sprintf("shell exited: %v", msg.err)
 		} else {
@@ -824,11 +1128,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tickMsg:
 		now := time.Time(msg)
+		next := tickCmd(m.refreshInterval)
+		if !m.autoRefresh {
+			return m, next
+		}
+		m, refresh := m.autoRefreshActiveView(now)
+		if refresh == nil {
+			return m, next
+		}
+		return m, tea.Batch(next, refresh)
+	case idleTickMsg:
+		now := time.Time(msg)
 		if m.idleTimeout > 0 && !m.lastActivity.IsZero() && !now.Before(m.lastActivity.Add(m.idleTimeout)) {
 			m.status = fmt.Sprintf("Idle for %s; exiting", m.idleTimeout)
 			return m, tea.Quit
 		}
-		return m, tea.Batch(tickCmd(), loadInfraCmd(m.client))
+		return m, idleTickCmd(m.idleTimeout)
 	}
 
 	return m, nil
@@ -850,44 +1165,41 @@ func (m model) View() string {
 		if m.log.plain {
 			body = m.normalizeRenderedBlock(body, middleHeight)
 		}
+		if m.helpActive {
+			body = m.renderOverlay(body, m.renderHelpOverlay(), middleHeight)
+		}
+		return m.styles.app.Render(header + "\n" + body + "\n" + footer)
+	}
+	if m.helpActive {
+		body := m.renderBody(availableHeight)
+		help := m.renderHelpOverlay()
+		if m.overlayNeedsResize(help) {
+			help = m.renderCompactHelpOverlay()
+		}
+		body = m.renderOverlay(body, help, middleHeight)
+		body = m.normalizeRenderedBlock(body, middleHeight)
 		return m.styles.app.Render(header + "\n" + body + "\n" + footer)
 	}
 
 	bodyHeight, commandHeight := m.splitMainAndCommandHeights(availableHeight)
+	// Blocking overlays need the full middle area. Keeping the command history
+	// visible underneath a modal steals enough rows to clip choices and the
+	// confirmation guidance on common 60x20 terminals.
+	if m.blockingOverlayActive() {
+		bodyHeight = availableHeight
+		commandHeight = 0
+	}
 	bodyTotalHeight := middleHeight
 	if commandHeight > 0 {
 		bodyTotalHeight = middleHeight - commandHeight
 	}
 
 	body := m.renderBody(bodyHeight)
-	if m.popup.active {
-		body = m.renderBodyWithPopup(body, bodyTotalHeight)
-	} else if m.accessAction.active {
-		body = m.renderOverlay(body, m.renderAccessActionPopup(), bodyTotalHeight)
-	} else if m.nodeStatus.active {
-		body = m.renderOverlay(body, m.renderNodeStatusConfirmPopup(), bodyTotalHeight)
-	} else if m.edit.active {
-		body = m.renderBodyWithEditPopup(body, bodyTotalHeight)
-	} else if m.nsAttrEdit.active {
-		body = m.renderOverlay(body, m.renderNamespaceAttrEditPopup(), bodyTotalHeight)
-	} else if m.nsGoTo.active {
-		body = m.renderOverlay(body, m.renderNamespaceGoToPopup(), bodyTotalHeight)
-	} else if m.nsMkdir.active {
-		body = m.renderOverlay(body, m.renderNamespaceMkdirPopup(), bodyTotalHeight)
-	} else if m.ioShapingEdit.active {
-		body = m.renderOverlay(body, m.renderIOShapingPolicyEditPopup(), bodyTotalHeight)
-	} else if m.groupDrain.active {
-		body = m.renderOverlay(body, m.renderGroupDrainConfirmPopup(), bodyTotalHeight)
-	} else if m.apollon.active {
-		body = m.renderOverlay(body, m.renderApollonDrainConfirmPopup(), bodyTotalHeight)
-	} else if m.qdbCoup.active {
-		body = m.renderOverlay(body, m.renderQDBCoupConfirmPopup(), bodyTotalHeight)
-	} else if m.qdbCoupDone.active {
-		body = m.renderOverlay(body, m.renderQDBCoupResultPopup(), bodyTotalHeight)
-	} else if m.fsEdit.active {
-		body = m.renderOverlay(body, m.renderFSConfigStatusEditPopup(), bodyTotalHeight)
-	} else if m.alert.active {
-		body = m.renderOverlay(body, m.renderErrorAlert(), bodyTotalHeight)
+	if popup, ok := m.activeBlockingOverlay(); ok {
+		if m.overlayNeedsResize(popup) {
+			popup = m.renderResizeRequiredPopup()
+		}
+		body = m.renderOverlay(body, popup, bodyTotalHeight)
 	}
 
 	body = m.normalizeRenderedBlock(body, bodyTotalHeight)
@@ -899,10 +1211,88 @@ func (m model) View() string {
 	return m.styles.app.Render(header + "\n" + middle + "\n" + footer)
 }
 
+func (m model) blockingOverlayActive() bool {
+	return m.popup.active ||
+		m.accessAction.active ||
+		m.nodeStatus.active ||
+		m.edit.active ||
+		m.nsAttrEdit.active ||
+		m.nsGoTo.active ||
+		m.nsMkdir.active ||
+		m.ioShapingEdit.active ||
+		m.groupDrain.active ||
+		m.apollon.active ||
+		m.qdbCoup.active ||
+		m.qdbCoupDone.active ||
+		m.fsEdit.active ||
+		m.alert.active
+}
+
+func (m model) activeBlockingOverlay() (string, bool) {
+	switch {
+	case m.popup.active:
+		return m.renderFilterPopup(), true
+	case m.accessAction.active:
+		return m.renderAccessActionPopup(), true
+	case m.nodeStatus.active:
+		return m.renderNodeStatusConfirmPopup(), true
+	case m.edit.active:
+		if m.edit.stage == editStageInput {
+			return m.renderSpaceStatusEditPopup(), true
+		}
+		if m.edit.stage == editStageConfirm {
+			return m.renderSpaceStatusConfirmPopup(), true
+		}
+		return "", false
+	case m.nsAttrEdit.active:
+		return m.renderNamespaceAttrEditPopup(), true
+	case m.nsGoTo.active:
+		return m.renderNamespaceGoToPopup(), true
+	case m.nsMkdir.active:
+		return m.renderNamespaceMkdirPopup(), true
+	case m.ioShapingEdit.active:
+		return m.renderIOShapingPolicyEditPopup(), true
+	case m.groupDrain.active:
+		return m.renderGroupDrainConfirmPopup(), true
+	case m.apollon.active:
+		return m.renderApollonDrainConfirmPopup(), true
+	case m.qdbCoup.active:
+		return m.renderQDBCoupConfirmPopup(), true
+	case m.qdbCoupDone.active:
+		return m.renderQDBCoupResultPopup(), true
+	case m.fsEdit.active:
+		return m.renderFSConfigStatusEditPopup(), true
+	case m.alert.active:
+		return m.renderErrorAlert(), true
+	default:
+		return "", false
+	}
+}
+
+func (m model) overlayNeedsResize(popup string) bool {
+	middleHeight := max(0, m.height-lipgloss.Height(m.renderHeader())-lipgloss.Height(m.renderFooter()))
+	return lipgloss.Width(popup) > m.contentWidth() || lipgloss.Height(popup) > middleHeight
+}
+
+func (m model) blockingOverlayNeedsResize() bool {
+	popup, ok := m.activeBlockingOverlay()
+	return ok && m.overlayNeedsResize(popup)
+}
+
+func (m model) renderResizeRequiredPopup() string {
+	return m.renderModal([]string{
+		m.styles.popupTitle.Render("Resize"),
+		"",
+		"Small",
+		"",
+		m.styles.status.Render("Esc"),
+	}, lipgloss.Color("203"), 0)
+}
+
 func (m model) startupLoading() bool {
 	switch m.activeView {
 	case viewMGM, viewQDB:
-		return len(m.mgms) == 0 && (m.fstStatsLoading || m.fstsLoading || m.fileSystemsLoading)
+		return len(m.mgms) == 0 && m.mgmsLoading
 	case viewFST:
 		return len(m.fsts) == 0 && m.fstsLoading
 	case viewFileSystems:
@@ -935,30 +1325,22 @@ func (m model) shouldShowStartupSplash() bool {
 	return m.splash.active && m.startupLoading()
 }
 
-func (m model) renderBodyWithPopup(body string, height int) string {
-	return m.renderOverlay(body, m.renderFilterPopup(), height)
-}
-
-func (m model) renderBodyWithEditPopup(body string, height int) string {
-	var popup string
-	if m.edit.stage == editStageInput {
-		popup = m.renderSpaceStatusEditPopup()
-	} else if m.edit.stage == editStageConfirm {
-		popup = m.renderSpaceStatusConfirmPopup()
-	}
-	return m.renderOverlay(body, popup, height)
-}
-
 func (m model) onViewChanged() (tea.Model, tea.Cmd) {
+	// Invalidate timer chains and in-flight IO responses whenever the selected
+	// view changes. Re-entering the same view deliberately starts one fresh
+	// polling owner rather than adding another recurring timer.
+	m.ioShapingGeneration++
+	m.ioShapingPoliciesLoading = false
+	m.ioShapingConfigLoading = false
 	m.persistUIState()
+	m.status = fmt.Sprintf("Viewing %s", m.activeViewLabel())
 	switch m.activeView {
 	case viewNamespace:
 		return m.maybeLoadNamespace()
 	case viewSpaces:
 		if !m.spacesLoading && len(m.spaces) == 0 && m.spacesErr == nil {
-			m.spacesLoading = true
 			m.spacesErr = nil
-			return m, loadSpacesCmd(m.client)
+			return m, m.startSpacesLoad()
 		}
 		if m.spaceStatusActive {
 			return m.maybeLoadSpaceStatus(m.spaceStatusTarget)
@@ -966,41 +1348,36 @@ func (m model) onViewChanged() (tea.Model, tea.Cmd) {
 		return m, nil
 	case viewGroups:
 		if !m.groupsLoading && len(m.groups) == 0 && m.groupsErr == nil {
-			m.groupsLoading = true
 			m.groupsErr = nil
-			return m, loadGroupsCmd(m.client)
+			return m, m.startGroupsLoad()
 		}
 		return m, nil
 	case viewVID:
 		if !m.vidLoading && len(m.vidRecords) == 0 && m.vidErr == nil {
 			m.vidLoading = true
 			m.vidErr = nil
-			return m, loadVIDCmd(m.client, m.vidMode)
+			return m, loadVIDCmd(m.client, m.vidMode, m.vidGeneration)
 		}
 		return m, nil
 	case viewAccess:
 		if !m.accessLoading && len(m.accessRecords) == 0 && m.accessErr == nil {
-			m.accessLoading = true
 			m.accessErr = nil
-			return m, loadAccessCmd(m.client)
+			return m, m.startAccessLoad()
 		}
 		return m, nil
 	case viewNamespaceStats:
 		cmds := make([]tea.Cmd, 0, 2)
 		if !m.nsStatsLoading && m.namespaceStats == (eos.NamespaceStats{}) && m.nsStatsErr == nil {
-			m.nsStatsLoading = true
 			m.nsStatsErr = nil
-			cmds = append(cmds, loadNamespaceStatsCmd(m.client))
+			cmds = append(cmds, m.startNamespaceStatsLoad())
 		}
 		if !m.inspectorLoading && !hasInspectorStatsData(m.inspectorStats) && m.inspectorErr == nil {
-			m.inspectorLoading = true
 			m.inspectorErr = nil
-			cmds = append(cmds, loadInspectorCmd(m.client))
+			cmds = append(cmds, m.startInspectorLoad())
 		}
 		if !m.fstStatsLoading && m.nodeStats == (eos.NodeStats{}) && m.nodeStatsErr == nil {
-			m.fstStatsLoading = true
 			m.nodeStatsErr = nil
-			cmds = append(cmds, loadNodeStatsCmd(m.client))
+			cmds = append(cmds, m.startNodeStatsLoad())
 		}
 		if len(cmds) == 0 {
 			return m, nil
@@ -1011,7 +1388,11 @@ func (m model) onViewChanged() (tea.Model, tea.Cmd) {
 	case viewIOShaping:
 		m.ioShapingLoading = true
 		m.ioShapingErr = nil
-		return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), ioShapingTickCmd(), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode), ioShapingPolicyTickCmd())
+		m.markIOShapingPolicyLoading()
+		return m, tea.Batch(
+			loadIOShapingViewCmd(m.client, m.ioShapingMode, m.ioShapingGeneration),
+			loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode, m.ioShapingGeneration),
+		)
 	default:
 		return m, nil
 	}
@@ -1020,74 +1401,118 @@ func (m model) onViewChanged() (tea.Model, tea.Cmd) {
 func (m model) refreshActiveView() (tea.Model, tea.Cmd) {
 	switch m.activeView {
 	case viewNamespace:
-		m.nsLoaded = false
-		m.nsLoading = true
-		m.nsErr = nil
+		if m.nsLoading {
+			m.status = "Namespace refresh already in progress"
+			return m, nil
+		}
 		m.status = fmt.Sprintf("Refreshing namespace %s...", m.directory.Path)
-		return m, loadDirectoryCmd(m.client, m.directory.Path)
+		return m.requestDirectory(m.directory.Path)
 	case viewSpaces:
 		if m.spaceStatusActive {
+			if m.spaceStatusLoading {
+				m.status = "Space status refresh already in progress"
+				return m, nil
+			}
 			m.spaceStatusLoading = true
 			m.spaceStatusErr = nil
 			m.status = fmt.Sprintf("Refreshing space status for %s...", m.spaceStatusTarget)
-			return m, loadSpaceStatusCmd(m.client, m.spaceStatusTarget)
+			return m.requestSpaceStatus(m.spaceStatusTarget)
 		}
-		m.spacesLoading = true
+		if m.spacesLoading {
+			m.status = "Spaces refresh already in progress"
+			return m, nil
+		}
 		m.spacesErr = nil
 		m.status = "Refreshing spaces..."
-		return m, loadSpacesCmd(m.client)
+		return m, m.startSpacesLoad()
 	case viewGroups:
-		m.groupsLoading = true
+		if m.groupsLoading {
+			m.status = "Groups refresh already in progress"
+			return m, nil
+		}
 		m.groupsErr = nil
 		m.status = "Refreshing groups..."
-		return m, loadGroupsCmd(m.client)
+		return m, m.startGroupsLoad()
 	case viewNamespaceStats:
-		m.nsStatsLoading = true
-		m.fstStatsLoading = true
-		m.inspectorLoading = true
+		if m.nsStatsLoading || m.fstStatsLoading || m.fstsLoading || m.fileSystemsLoading {
+			m.status = "General stats refresh already in progress"
+			return m, nil
+		}
 		m.nsStatsErr = nil
 		m.nodeStatsErr = nil
-		m.inspectorErr = nil
 		m.status = "Refreshing general stats..."
-		return m, tea.Batch(loadNamespaceStatsCmd(m.client), loadNodeStatsCmd(m.client), loadInspectorCmd(m.client))
+		cmds := []tea.Cmd{
+			m.startNamespaceStatsLoad(),
+			m.startNodeStatsLoad(),
+			m.startFSTLoad(),
+			m.startFileSystemsLoad(),
+		}
+		if !m.inspectorLoading {
+			m.inspectorErr = nil
+			cmds = append(cmds, m.startInspectorLoad())
+		}
+		return m, tea.Batch(cmds...)
 	case viewSpaceStatus:
 		m.spaceStatusLoading = true
 		m.spaceStatusErr = nil
 		m.status = fmt.Sprintf("Refreshing space status for %s...", m.currentSpaceStatusName())
-		return m, loadSpaceStatusCmd(m.client, m.currentSpaceStatusName())
+		return m.requestSpaceStatus(m.currentSpaceStatusName())
 	case viewIOShaping:
+		if m.ioShapingLoading || m.ioShapingPoliciesLoading || m.ioShapingConfigLoading {
+			m.status = "IO shaping refresh already in progress"
+			return m, nil
+		}
 		m.ioShapingLoading = true
 		m.ioShapingErr = nil
+		m.markIOShapingPolicyLoading()
 		m.status = "Refreshing IO shaping..."
-		return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
+		return m, tea.Batch(
+			loadIOShapingViewCmd(m.client, m.ioShapingMode, m.ioShapingGeneration),
+			loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode, m.ioShapingGeneration),
+		)
 	case viewVID:
+		if m.vidLoading {
+			m.status = "VID refresh already in progress"
+			return m, nil
+		}
 		m.vidLoading = true
 		m.vidErr = nil
 		m.status = fmt.Sprintf("Refreshing VID scope %s...", m.vidMode.label())
-		return m, loadVIDCmd(m.client, m.vidMode)
+		return m, loadVIDCmd(m.client, m.vidMode, m.vidGeneration)
 	case viewAccess:
-		m.accessLoading = true
+		if m.accessLoading {
+			m.status = "Access refresh already in progress"
+			return m, nil
+		}
 		m.accessErr = nil
 		m.status = "Refreshing access rules..."
-		return m, loadAccessCmd(m.client)
+		return m, m.startAccessLoad()
 	case viewMGM, viewQDB:
 		if m.mgmsLoading || m.mgmVersionsLoading {
 			m.status = "MGM/QDB refresh already in progress..."
 			return m, nil
 		}
-		m.mgmsLoading = true
 		m.mgmsErr = nil
-		m.mgmVersionsLoading = true
 		m.mgmVersionsErr = nil
 		m.status = "Refreshing MGM/QDB topology and versions..."
-		return m, tea.Batch(loadMGMsCmd(m.client), reloadMGMVersionsCmd(m.client))
+		return m, tea.Batch(m.startMGMLoad(), m.startMGMVersionsReload())
+	case viewFST:
+		if m.fstsLoading {
+			m.status = "Node refresh already in progress"
+			return m, nil
+		}
+		m.fstsErr = nil
+		m.status = "Refreshing FST nodes..."
+		return m, m.startFSTLoad()
+	case viewFileSystems:
+		if m.fileSystemsLoading {
+			m.status = "Filesystem refresh already in progress"
+			return m, nil
+		}
+		m.fileSystemsErr = nil
+		m.status = "Refreshing filesystems..."
+		return m, m.startFileSystemsLoad()
 	default:
-		m.fstStatsLoading = true
-		m.fstsLoading = true
-		m.mgmsLoading = true
-		m.fileSystemsLoading = true
-		m.spacesLoading = true
-		m.nsStatsLoading = true
 		m.nodeStatsErr = nil
 		m.fstsErr = nil
 		m.mgmsErr = nil
@@ -1095,7 +1520,103 @@ func (m model) refreshActiveView() (tea.Model, tea.Cmd) {
 		m.spacesErr = nil
 		m.nsStatsErr = nil
 		m.status = "Refreshing..."
-		return m, loadInfraCmd(m.client)
+		return m, tea.Batch(
+			m.startNodeStatsLoad(),
+			m.startFSTLoad(),
+			m.startMGMLoad(),
+			m.startFileSystemsLoad(),
+			m.startSpacesLoad(),
+			m.startNamespaceStatsLoad(),
+			m.startInspectorLoad(),
+		)
+	}
+}
+
+func (m *model) markIOShapingPolicyLoading() {
+	m.ioShapingPoliciesErr = nil
+	m.ioShapingConfigErr = nil
+	m.ioShapingConfigLoading = true
+	m.ioShapingPoliciesLoading = ioShapingModeHasPolicies(m.ioShapingMode)
+}
+
+// autoRefreshActiveView refreshes only the data the operator is currently
+// looking at. Loading flags provide single-flight protection, so a slow EOS or
+// SSH request cannot cause overlapping refresh waves.
+func (m model) autoRefreshActiveView(now time.Time) (model, tea.Cmd) {
+	switch m.activeView {
+	case viewNamespaceStats:
+		if m.nsStatsLoading || m.fstStatsLoading || m.fstsLoading || m.fileSystemsLoading {
+			return m, nil
+		}
+		cmds := []tea.Cmd{
+			m.startNamespaceStatsLoad(),
+			m.startNodeStatsLoad(),
+			m.startFSTLoad(),
+			m.startFileSystemsLoad(),
+		}
+		if !m.inspectorLoading && m.inspectorAutoRefreshDue(now) {
+			cmds = append(cmds, m.startInspectorLoad())
+		}
+		return m, tea.Batch(cmds...)
+	case viewFST:
+		if m.fstsLoading {
+			return m, nil
+		}
+		return m, m.startFSTLoad()
+	case viewFileSystems:
+		if m.fileSystemsLoading {
+			return m, nil
+		}
+		return m, m.startFileSystemsLoad()
+	case viewSpaces:
+		if m.spaceStatusActive {
+			if m.spaceStatusLoading || m.spaceStatusTarget == "" {
+				return m, nil
+			}
+			m.spaceStatusLoading = true
+			return m.requestSpaceStatus(m.spaceStatusTarget)
+		}
+		if m.spacesLoading {
+			return m, nil
+		}
+		return m, m.startSpacesLoad()
+	case viewGroups:
+		if m.groupsLoading {
+			return m, nil
+		}
+		return m, m.startGroupsLoad()
+	case viewIOShaping:
+		if m.ioShapingLoading || m.ioShapingPoliciesLoading || m.ioShapingConfigLoading {
+			return m, nil
+		}
+		m.ioShapingLoading = true
+		m.markIOShapingPolicyLoading()
+		return m, tea.Batch(
+			loadIOShapingViewCmd(m.client, m.ioShapingMode, m.ioShapingGeneration),
+			loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode, m.ioShapingGeneration),
+		)
+	case viewMGM, viewQDB:
+		if m.mgmsLoading {
+			return m, nil
+		}
+		cmds := []tea.Cmd{m.startMGMLoad()}
+		if !m.mgmVersionsLoading && (m.mgmVersionsUpdated.IsZero() || now.Sub(m.mgmVersionsUpdated) >= mgmVersionRefreshInterval) {
+			cmds = append(cmds, m.startMGMVersionsReload())
+		}
+		return m, tea.Batch(cmds...)
+	case viewVID:
+		if m.vidLoading {
+			return m, nil
+		}
+		m.vidLoading = true
+		return m, loadVIDCmd(m.client, m.vidMode, m.vidGeneration)
+	case viewAccess:
+		if m.accessLoading {
+			return m, nil
+		}
+		return m, m.startAccessLoad()
+	default:
+		return m, nil
 	}
 }
 
@@ -1181,6 +1702,17 @@ func hasInspectorStatsData(stats eos.InspectorStats) bool {
 		len(stats.BirthVolume) > 0
 }
 
+func (m model) inspectorAutoRefreshDue(now time.Time) bool {
+	if m.inspectorUpdated.IsZero() {
+		return true
+	}
+	interval := inspectorRefreshInterval
+	if m.inspectorErr != nil {
+		interval = inspectorFailureRetryInterval
+	}
+	return now.Sub(m.inspectorUpdated) >= interval
+}
+
 func (m model) maybeLoadNamespace() (tea.Model, tea.Cmd) {
 	if m.nsLoading {
 		return m, nil
@@ -1189,10 +1721,21 @@ func (m model) maybeLoadNamespace() (tea.Model, tea.Cmd) {
 		return m.startNamespaceAttrLoad(false)
 	}
 
+	m.status = fmt.Sprintf("Loading namespace %s...", m.directory.Path)
+	return m.requestDirectory(m.directory.Path)
+}
+
+func (m model) requestDirectory(path string) (tea.Model, tea.Cmd) {
+	path = cleanPath(path)
+	m.nsRequestID++
+	m.nsRequestedPath = path
 	m.nsLoading = true
 	m.nsErr = nil
-	m.status = fmt.Sprintf("Loading namespace %s...", m.directory.Path)
-	return m, loadDirectoryCmd(m.client, m.directory.Path)
+	return m, loadDirectoryCmd(m.client, path, m.nsRequestID)
+}
+
+func (m model) namespaceNavigationLoading() bool {
+	return m.nsLoading && cleanPath(m.nsRequestedPath) != cleanPath(m.directory.Path)
 }
 
 func (m model) currentNamespaceAttrTargetPath() string {
@@ -1218,11 +1761,12 @@ func (m model) startNamespaceAttrLoad(force bool) (tea.Model, tea.Cmd) {
 	}
 
 	m.nsAttrsTargetPath = path
+	m.nsAttrsRequestID++
 	m.nsAttrsLoading = true
 	m.nsAttrsLoaded = false
 	m.nsAttrsErr = nil
 	m.nsAttrs = nil
-	return m, loadNamespaceAttrsCmd(m.client, path)
+	return m, loadNamespaceAttrsCmd(m.client, path, m.nsAttrsRequestID)
 }
 
 func (m model) maybeLoadSpaceStatus(space string) (tea.Model, tea.Cmd) {
@@ -1233,16 +1777,61 @@ func (m model) maybeLoadSpaceStatus(space string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.spaceStatusTarget != space {
+		m.spaceStatus = nil
+		m.spaceStatusSelected = 0
+	}
+	m.spaceStatusTarget = space
+	m.status = fmt.Sprintf("Loading space status for %s...", space)
+	return m.requestSpaceStatus(space)
+}
+
+func (m model) requestSpaceStatus(space string) (model, tea.Cmd) {
+	m.spaceStatusRequestID++
 	m.spaceStatusTarget = space
 	m.spaceStatusLoading = true
 	m.spaceStatusErr = nil
-	m.status = fmt.Sprintf("Loading space status for %s...", space)
-	return m, loadSpaceStatusCmd(m.client, space)
+	return m, loadSpaceStatusCmd(m.client, space, m.spaceStatusRequestID)
+}
+
+func (m *model) markRefreshed(status string, views ...viewID) {
+	now := time.Now()
+	for _, view := range views {
+		if view >= 0 && int(view) < len(m.lastRefreshAt) {
+			m.lastRefreshAt[view] = now
+		}
+	}
+	m.setStatusForViews(status, views...)
+}
+
+func (m *model) setStatusForViews(status string, views ...viewID) {
+	if status == "" {
+		return
+	}
+	for _, view := range views {
+		if m.activeView == view {
+			m.status = status
+			return
+		}
+	}
+}
+
+func (m model) activeViewLastRefresh() time.Time {
+	if m.activeView >= 0 && int(m.activeView) < len(m.lastRefreshAt) {
+		return m.lastRefreshAt[m.activeView]
+	}
+	return time.Time{}
 }
 
 func (m model) computeClusterHealth() string {
 	fsts := m.fsts
 	fss := m.fileSystems
+	if m.fstsErr != nil || m.fileSystemsErr != nil {
+		return "UNKNOWN"
+	}
+	if (m.fstsLoading && len(fsts) == 0) || (m.fileSystemsLoading && len(fss) == 0) {
+		return "CHECKING"
+	}
 	if len(fsts) == 0 && len(fss) == 0 {
 		return "-"
 	}

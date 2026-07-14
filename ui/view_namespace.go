@@ -12,6 +12,15 @@ import (
 
 func (m model) renderNamespaceView(height int) string {
 	width := m.panelWidth()
+	contentWidth := panelContentWidth(width)
+	if m.namespaceNavigationLoading() {
+		lines := []string{
+			m.styles.label.Render("Namespace Path ") + m.styles.value.Render(m.nsRequestedPath),
+			"",
+			fmt.Sprintf("Loading directory listing for %s...", m.nsRequestedPath),
+		}
+		return m.styles.panelDim.Width(width).Render(normalizePanelLines(lines, contentWidth, height))
+	}
 	entries := m.visibleNamespaceEntries()
 
 	fixedListLines := 3 // Title, blank, header
@@ -106,15 +115,15 @@ func (m model) renderNamespaceList(width, height int) string {
 		lines = append(lines, summary)
 	}
 
-	if m.nsLoading {
+	if m.nsLoading && len(entries) == 0 {
 		lines = append(lines, "Loading directory listing...")
-	} else if m.nsErr != nil {
+	} else if m.nsErr != nil && len(entries) == 0 {
 		lines = append(lines, m.styles.error.Render(m.nsErr.Error()))
 	} else if len(entries) == 0 {
 		lines = append(lines, "(empty)")
 	} else {
 		start, end := visibleWindow(len(entries), m.nsSelected, max(1, panelContentHeight(height)-len(lines)))
-		lines[0] = title + renderScrollSummary(start, end, len(entries))
+		lines[0] = renderInlineSuffix(title, renderScrollSummary(start, end, len(entries)), contentWidth)
 		for i := start; i < end; i++ {
 			entry := entries[i]
 			line := formatTableRow(columns, []string{
@@ -132,7 +141,7 @@ func (m model) renderNamespaceList(width, height int) string {
 		}
 	}
 
-	return m.styles.panel.Width(width).Render(fitLines(lines, panelContentHeight(height)))
+	return m.styles.panel.Width(width).Render(normalizePanelLines(lines, contentWidth, panelContentHeight(height)))
 }
 
 func (m model) renderNamespaceDetails(width, height int) string {
@@ -336,15 +345,6 @@ func (m model) renderNamespaceAttrsPanel(width, height int) string {
 	return m.styles.panelDim.Width(width).Render(normalizePanelLines(lines, contentWidth, panelContentHeight(height)))
 }
 
-func normalizePanelLines(lines []string, contentWidth, contentHeight int) string {
-	fitted := fitLines(lines, contentHeight)
-	rows := strings.Split(fitted, "\n")
-	for i, row := range rows {
-		rows[i] = padVisibleWidth(row, contentWidth)
-	}
-	return strings.Join(rows, "\n")
-}
-
 func normalizeBlockWidth(block string, width int) string {
 	rows := strings.Split(block, "\n")
 	for i, row := range rows {
@@ -361,22 +361,19 @@ func normalizeBlockWidth(block string, width int) string {
 func (m model) namespaceAttrEditPopupContentWidth() int {
 	const minWidth = 60
 	const softCap = 96
-	// 2 for the border + 4 for Padding(1, 2) = 6 horizontal overhead.
-	hardCap := max(minWidth, m.contentWidth()-6)
-	cap := min(softCap, hardCap)
 
 	natural := lipgloss.Width("Edit Attribute")
 	natural = max(natural, lipgloss.Width(m.nsAttrEdit.targetPath))
 	natural = max(natural, lipgloss.Width("↑↓ select  •  g/G home/end  •  enter edit  •  r toggle recursive  •  esc cancel"))
 
-	return min(cap, max(minWidth, natural))
+	return m.modalContentWidth(min(softCap, max(minWidth, natural)))
 }
 
 // wrapAttrEntry hard-wraps a "key = value" line at the given inner width and
 // returns the wrapped sub-lines. Continuation lines are indented to align
 // under the value.
 func wrapAttrEntry(line string, innerWidth int) []string {
-	innerWidth = max(10, innerWidth)
+	innerWidth = max(1, innerWidth)
 	wrapped := ansi.Hardwrap(line, innerWidth, true)
 	parts := strings.Split(wrapped, "\n")
 	if len(parts) <= 1 {
@@ -391,11 +388,7 @@ func wrapAttrEntry(line string, innerWidth int) []string {
 
 func (m model) renderNamespaceAttrEditPopup() string {
 	if len(m.nsAttrEdit.attrs) == 0 {
-		return m.styles.panel.
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("62")).
-			Padding(1, 2).
-			Render("No attributes available")
+		return m.renderModal([]string{"No attributes available"}, lipgloss.Color("62"), 0)
 	}
 
 	current := m.nsAttrEdit.attrs[m.nsAttrEdit.selected]
@@ -449,11 +442,7 @@ func (m model) renderNamespaceAttrEditPopup() string {
 		)
 	}
 
-	return m.styles.panel.
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("62")).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return m.renderModal(lines, lipgloss.Color("62"), contentWidth)
 }
 
 func (m model) renderNamespaceGoToPopup() string {
@@ -468,11 +457,7 @@ func (m model) renderNamespaceGoToPopup() string {
 		"",
 		m.styles.status.Render("enter open  •  esc cancel  •  absolute path or relative to current"),
 	}
-	return m.styles.panel.
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("62")).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return m.renderModal(lines, lipgloss.Color("62"), 0)
 }
 
 func (m model) renderNamespaceMkdirPopup() string {
@@ -487,11 +472,7 @@ func (m model) renderNamespaceMkdirPopup() string {
 		"",
 		m.styles.status.Render("enter create  •  esc cancel  •  absolute path or relative to current"),
 	}
-	return m.styles.panel.
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("62")).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return m.renderModal(lines, lipgloss.Color("62"), 0)
 }
 
 func (m model) selectedNamespaceEntry() (eos.Entry, bool) {

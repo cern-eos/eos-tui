@@ -3,6 +3,7 @@ package eos
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"path"
 	"regexp"
 	"strconv"
@@ -41,22 +42,114 @@ func (s flexibleString) String() string { return string(s) }
 
 var shellSafeArgPattern = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
 
-// stripEOSPreamble removes leading lines that are not part of a JSON payload.
-// EOS commands occasionally emit `* <message>` lines on stdout (e.g. error or
-// info annotations) before or after the JSON.  This function returns the first
-// contiguous block that looks like JSON (starts with `[` or `{`).
+// stripEOSPreamble extracts the first complete JSON value from mixed EOS
+// output. EOS and SSH may add informational lines before or after an otherwise
+// valid payload, especially when stdout and stderr are combined.
 func stripEOSPreamble(b []byte) []byte {
+	_, payload, _, ok := extractEOSJSON(b)
+	if ok {
+		return payload
+	}
+	return b
+}
+
+// extractEOSJSON finds the first complete JSON value in mixed command output.
+// Invalid bracket-prefixed banners are skipped rather than hiding a valid JSON
+// value on a later line. The returned remainder begins immediately after the
+// decoded value and is used to detect trailing EOS error annotations.
+func extractEOSJSON(b []byte) (prefix, payload, remainder []byte, ok bool) {
+	offset := 0
 	for _, line := range strings.SplitAfter(string(b), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
-			// Return from this point to end-of-output.
-			idx := strings.Index(string(b), trimmed)
-			if idx >= 0 {
-				return []byte(strings.TrimSpace(string(b[idx:])))
+			lineOffset := strings.Index(line, trimmed)
+			if lineOffset >= 0 {
+				start := offset + lineOffset
+				candidate := b[start:]
+				decoder := json.NewDecoder(bytes.NewReader(candidate))
+				var raw json.RawMessage
+				if err := decoder.Decode(&raw); err == nil {
+					consumed := decoder.InputOffset()
+					return bytes.TrimSpace(b[:start]), bytes.TrimSpace(raw), bytes.TrimSpace(candidate[consumed:]), true
+				}
 			}
 		}
+		offset += len(line)
 	}
-	return b
+	return nil, nil, nil, false
+}
+
+// unmarshalEOSJSON decodes EOS machine output and rejects command-level error
+// envelopes even when the eos process exits with status 0.
+func unmarshalEOSJSON(output []byte, target any) error {
+	prefix, payload, remainder, ok := extractEOSJSON(output)
+	if !ok {
+		payload = bytes.TrimSpace(output)
+	}
+	if detail := eosJSONAnnotationError(prefix); detail != "" && !eosJSONKnownFallbackNoise(detail, payload) {
+		return fmt.Errorf("EOS command reported an error before its JSON payload: %s", detail)
+	}
+	if err := eosJSONStatusError(payload); err != nil {
+		return err
+	}
+	if detail := eosJSONAnnotationError(remainder); detail != "" {
+		return fmt.Errorf("EOS command reported an error after its JSON payload: %s", detail)
+	}
+	return json.Unmarshal(payload, target)
+}
+
+func eosJSONKnownFallbackNoise(detail string, payload []byte) bool {
+	lower := strings.ToLower(detail)
+	localhostFailure := strings.Contains(lower, "localhost") &&
+		(strings.Contains(lower, "cannot connect") || strings.Contains(lower, "failed to connect") || strings.Contains(lower, "connection refused"))
+	if !localhostFailure {
+		return false
+	}
+	return eosJSONExplicitSuccessStatus(payload)
+}
+
+func eosJSONExplicitSuccessStatus(payload []byte) bool {
+	var status struct {
+		Retc json.RawMessage `json:"retc"`
+	}
+	if err := json.Unmarshal(payload, &status); err != nil || len(status.Retc) == 0 {
+		return false
+	}
+	retc := strings.Trim(strings.TrimSpace(string(status.Retc)), `"`)
+	return retc == "0"
+}
+
+func eosJSONStatusError(payload []byte) error {
+	if len(payload) == 0 || payload[0] != '{' {
+		return nil
+	}
+	var status struct {
+		Retc     json.RawMessage `json:"retc"`
+		ErrorMsg string          `json:"errormsg"`
+	}
+	if err := json.Unmarshal(payload, &status); err != nil || len(status.Retc) == 0 {
+		return nil
+	}
+	retc := strings.Trim(strings.TrimSpace(string(status.Retc)), `"`)
+	if retc == "" || retc == "0" {
+		return nil
+	}
+	detail := strings.TrimSpace(status.ErrorMsg)
+	if detail == "" {
+		detail = "unspecified EOS error"
+	}
+	return fmt.Errorf("%s (retc %s)", detail, retc)
+}
+
+func eosJSONAnnotationError(output []byte) string {
+	for _, rawLine := range strings.Split(string(output), "\n") {
+		line := strings.TrimSpace(rawLine)
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "* error") || strings.HasPrefix(lower, "error:") {
+			return line
+		}
+	}
+	return ""
 }
 
 // shellQuote wraps s in single quotes, escaping any embedded single quotes.

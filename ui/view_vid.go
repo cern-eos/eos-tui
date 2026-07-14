@@ -38,15 +38,15 @@ func (m model) renderVIDList(width, height int) string {
 	}
 
 	switch {
-	case m.vidLoading:
+	case m.vidLoading && len(m.vidRecords) == 0:
 		lines = append(lines, "Loading VID mappings...")
-	case m.vidErr != nil:
+	case m.vidErr != nil && len(m.vidRecords) == 0:
 		lines = append(lines, m.styles.error.Render(m.vidErr.Error()))
 	case len(m.vidRecords) == 0:
 		lines = append(lines, "(no entries)")
 	default:
 		start, end := visibleWindow(len(m.vidRecords), m.vidSelected, max(1, panelContentHeight(height)-len(lines)))
-		lines[0] = title + renderScrollSummary(start, end, len(m.vidRecords))
+		lines[0] = renderInlineSuffix(title, renderScrollSummary(start, end, len(m.vidRecords)), contentWidth)
 		for i := start; i < end; i++ {
 			line := formatTableRow(columns, dataRows[i])
 			if i == m.vidSelected {
@@ -56,7 +56,7 @@ func (m model) renderVIDList(width, height int) string {
 		}
 	}
 
-	return m.styles.panel.Width(width).Render(fitLines(lines, panelContentHeight(height)))
+	return m.styles.panel.Width(width).Render(normalizePanelLines(lines, contentWidth, panelContentHeight(height)))
 }
 
 func (m model) renderVIDDetails(width, height int) string {
@@ -87,7 +87,7 @@ func (m model) renderVIDDetails(width, height int) string {
 		truncate("eos vid tokensudo 0|1|2|3", contentWidth),
 	)
 
-	return m.styles.panelDim.Width(width).Render(fitLines(lines, panelContentHeight(height)))
+	return m.styles.panelDim.Width(width).Render(normalizePanelLines(lines, contentWidth, panelContentHeight(height)))
 }
 
 func (m model) renderVIDModeTabs() string {

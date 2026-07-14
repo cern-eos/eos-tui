@@ -38,7 +38,16 @@ func loadPersistedUIState() persistedUIState {
 		return defaultPersistedUIState()
 	}
 
-	path := filepath.Join(home, ".eos-tui", persistedUIStateFile)
+	dir := filepath.Join(home, ".eos-tui")
+	dirInfo, err := os.Lstat(dir)
+	if err != nil || !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 {
+		return defaultPersistedUIState()
+	}
+	path := filepath.Join(dir, persistedUIStateFile)
+	fileInfo, err := os.Lstat(path)
+	if err != nil || !fileInfo.Mode().IsRegular() || fileInfo.Mode()&os.ModeSymlink != 0 {
+		return defaultPersistedUIState()
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return defaultPersistedUIState()
@@ -64,7 +73,7 @@ func savePersistedUIState(state persistedUIState) {
 	}
 
 	dir := filepath.Join(home, ".eos-tui")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := ensurePrivateUIStateDir(dir); err != nil {
 		return
 	}
 
@@ -91,6 +100,10 @@ func savePersistedUIState(state persistedUIState) {
 			_ = os.Remove(tmpPath)
 		}
 	}()
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return
+	}
 
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
@@ -109,6 +122,20 @@ func savePersistedUIState(state persistedUIState) {
 		return
 	}
 	cleanup = false
+}
+
+func ensurePrivateUIStateDir(dir string) error {
+	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+		return err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return os.ErrInvalid
+	}
+	return os.Chmod(dir, 0700)
 }
 
 func (m model) persistedUIState() persistedUIState {
