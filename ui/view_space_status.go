@@ -15,11 +15,11 @@ func (m model) renderSpaceStatusView(height int) string {
 	contentWidth := panelContentWidth(width)
 	spaceName := m.currentSpaceStatusName()
 
-	if m.spaceStatusLoading {
-		return m.styles.panelDim.Width(width).Render(fitLines([]string{fmt.Sprintf("Loading space status for %s...", spaceName)}, height))
+	if m.spaceStatusLoading && len(m.spaceStatus) == 0 {
+		return m.styles.panelDim.Width(width).Render(normalizePanelLines([]string{fmt.Sprintf("Loading space status for %s...", spaceName)}, contentWidth, height))
 	}
-	if m.spaceStatusErr != nil {
-		return m.styles.panelDim.Width(width).Render(fitLines([]string{m.styles.error.Render(m.spaceStatusErr.Error())}, height))
+	if m.spaceStatusErr != nil && len(m.spaceStatus) == 0 {
+		return m.styles.panelDim.Width(width).Render(normalizePanelLines([]string{m.styles.error.Render(m.spaceStatusErr.Error())}, contentWidth, height))
 	}
 
 	columns := allocateTableColumns(contentWidth, []tableColumn{
@@ -38,7 +38,7 @@ func (m model) renderSpaceStatusView(height int) string {
 		lines = append(lines, "(no space status entries)")
 	} else {
 		start, end := visibleWindow(len(m.spaceStatus), m.spaceStatusSelected, max(1, height-len(lines)))
-		lines[0] = title + renderScrollSummary(start, end, len(m.spaceStatus))
+		lines[0] = renderInlineSuffix(title, renderScrollSummary(start, end, len(m.spaceStatus)), contentWidth)
 		for i := start; i < end; i++ {
 			record := m.spaceStatus[i]
 			line := formatTableRow(columns, []string{record.Key, record.Value})
@@ -49,7 +49,7 @@ func (m model) renderSpaceStatusView(height int) string {
 		}
 	}
 
-	return m.styles.panel.Width(width).Render(fitLines(lines, height))
+	return m.styles.panel.Width(width).Render(normalizePanelLines(lines, contentWidth, height))
 }
 
 func (m model) selectedSpaceStatusRecord() (eos.SpaceStatusRecord, bool) {
@@ -107,11 +107,7 @@ func (m model) renderSpaceStatusEditPopup() string {
 		m.styles.status.Render("tab switch focus  •  g cancel  •  G continue  •  enter next"),
 	}
 
-	return m.styles.panel.
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("62")).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return m.renderModal(lines, lipgloss.Color("62"), 0)
 }
 
 func (m model) renderSpaceStatusConfirmPopup() string {
@@ -138,11 +134,7 @@ func (m model) renderSpaceStatusConfirmPopup() string {
 		m.styles.status.Render("g cancel  •  G confirm  •  enter apply"),
 	}
 
-	return m.styles.panel.
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("196")).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return m.renderModal(lines, lipgloss.Color("196"), 0)
 }
 
 func (m model) currentSpaceStatusName() string {

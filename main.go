@@ -32,6 +32,7 @@ func main() {
 		sshTarget         = flag.String("ssh", envOrDefaultCompat([]string{"EOS_TUI_SSH", "EOS_TUI_SSH_TARGET"}, ""), "SSH target for running EOS CLI remotely")
 		timeout           = flag.Duration("timeout", envDurationOrDefault("EOS_TUI_TIMEOUT", 15*time.Second), "per-request timeout")
 		idleTimeout       = flag.Duration("idle-timeout", envDurationOrDefault("EOS_TUI_IDLE_TIMEOUT", time.Hour), "quit after this duration without keyboard input (0 disables)")
+		refreshInterval   = flag.Duration("refresh", envDurationOrDefault("EOS_TUI_REFRESH_INTERVAL", 5*time.Second), "automatic refresh interval (0 disables)")
 		noAltScreen       = flag.Bool("no-alt-screen", envBoolOrDefault("EOS_TUI_NO_ALT_SCREEN", false), "disable alternate screen mode")
 		acceptNewHostKeys = flag.Bool("ssh-accept-new-host-keys", envBoolOrDefault("EOS_TUI_SSH_ACCEPT_NEW_HOST_KEYS", false), "auto-accept first-seen SSH host keys using StrictHostKeyChecking=accept-new")
 	)
@@ -46,6 +47,8 @@ func main() {
 		fmt.Fprintln(flag.CommandLine.Output(), "        per-request timeout")
 		fmt.Fprintln(flag.CommandLine.Output(), "  --idle-timeout duration")
 		fmt.Fprintln(flag.CommandLine.Output(), "        quit after this duration without keyboard input (0 disables)")
+		fmt.Fprintln(flag.CommandLine.Output(), "  --refresh duration")
+		fmt.Fprintln(flag.CommandLine.Output(), "        automatic refresh interval (0 disables)")
 		fmt.Fprintln(flag.CommandLine.Output(), "  --no-alt-screen")
 		fmt.Fprintln(flag.CommandLine.Output(), "        disable alternate screen mode")
 		fmt.Fprintln(flag.CommandLine.Output(), "  --ssh-accept-new-host-keys")
@@ -56,6 +59,18 @@ func main() {
 	if *versionFlag {
 		fmt.Println(version)
 		return
+	}
+	if *timeout <= 0 {
+		fmt.Fprintln(os.Stderr, "--timeout must be greater than zero")
+		os.Exit(2)
+	}
+	if *idleTimeout < 0 {
+		fmt.Fprintln(os.Stderr, "--idle-timeout cannot be negative")
+		os.Exit(2)
+	}
+	if *refreshInterval < 0 {
+		fmt.Fprintln(os.Stderr, "--refresh cannot be negative")
+		os.Exit(2)
 	}
 
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGHUP, syscall.SIGTERM)
@@ -95,7 +110,9 @@ func main() {
 
 	program := tea.NewProgram(
 		ui.NewModelWithOptions(client, displayTarget, "", ui.ModelOptions{
-			IdleTimeout: *idleTimeout,
+			IdleTimeout:        *idleTimeout,
+			RefreshInterval:    *refreshInterval,
+			DisableAutoRefresh: *refreshInterval == 0,
 		}),
 		options...,
 	)

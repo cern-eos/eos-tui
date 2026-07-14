@@ -41,7 +41,7 @@ func (m model) renderMGMView(height int) string {
 
 	if m.mgmsLoading && len(m.mgms) == 0 {
 		lines = append(lines, "loading management and quarkdb info...")
-	} else if m.mgmsErr != nil {
+	} else if m.mgmsErr != nil && len(m.mgms) == 0 {
 		lines = append(lines, m.styles.error.Render(m.mgmsErr.Error()))
 	} else if len(mgmRows) == 0 && len(qdbRows) == 0 {
 		lines = append(lines, "(no management nodes found)")
@@ -58,7 +58,7 @@ func (m model) renderMGMView(height int) string {
 		lines = append(lines, m.renderTopologyRows(contentWidth, bottomRows, qdbRows, selectedKind, selectedLocal, topologyHostQDB)...)
 	}
 
-	return m.styles.panel.Width(width).Render(fitLines(lines, height))
+	return m.styles.panel.Width(width).Render(normalizePanelLines(lines, contentWidth, height))
 }
 
 func (m model) topologyMGMRows() []topologyHostRow {
@@ -152,7 +152,7 @@ func (m model) selectedTopologyHost() (topologyHostRow, bool) {
 }
 
 func qdbCoupRemoteArgs() []string {
-	return []string{"redis-cli", "-p", "7777", "raft-attempt-coup"}
+	return eos.QDBCoupArgs()
 }
 
 func qdbCoupDisplayCommand(client *eos.Client, host string) string {
@@ -205,7 +205,7 @@ func (m model) renderQDBCoupConfirmPopup() string {
 		confirmBtn = m.styles.selected.Render(confirmBtn)
 	}
 
-	popupWidth := max(48, min(120, m.contentWidth()-16))
+	popupWidth := m.modalContentWidth(max(48, min(120, m.contentWidth()-16)))
 	commandLines := wrappedQDBPopupLines(m.qdbCoup.command, popupWidth)
 	lines := []string{
 		m.styles.popupTitle.Render("Confirm QDB Raft Coup"),
@@ -226,15 +226,7 @@ func (m model) renderQDBCoupConfirmPopup() string {
 		"",
 		m.styles.status.Render("g cancel  •  G confirm  •  enter apply  •  esc close"),
 	)
-	for i := range lines {
-		lines[i] = padVisibleWidth(lines[i], popupWidth)
-	}
-
-	return m.styles.panel.
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("196")).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return m.renderModal(lines, lipgloss.Color("196"), popupWidth)
 }
 
 func (m model) renderQDBCoupResultPopup() string {
@@ -250,7 +242,7 @@ func (m model) renderQDBCoupResultPopup() string {
 	if output == "" {
 		output = "(no output)"
 	}
-	popupWidth := max(48, min(120, m.contentWidth()-16))
+	popupWidth := m.modalContentWidth(max(48, min(120, m.contentWidth()-16)))
 	outputLines := wrappedQDBPopupLines(output, popupWidth)
 
 	lines := []string{
@@ -269,15 +261,7 @@ func (m model) renderQDBCoupResultPopup() string {
 		"",
 		m.styles.status.Render("enter / esc close"),
 	)
-	for i := range lines {
-		lines[i] = padVisibleWidth(lines[i], popupWidth)
-	}
-
-	return m.styles.panel.
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(borderColor).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return m.renderModal(lines, borderColor, popupWidth)
 }
 
 func wrappedQDBPopupLines(text string, width int) []string {

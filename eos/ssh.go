@@ -63,7 +63,11 @@ func (c *Client) runCommandContext(ctx context.Context, args ...string) ([]byte,
 		out, err = runner.CombinedOutput(ctx, args[0], args[1:]...)
 	} else {
 		remoteCommand := shellJoin(args)
-		sshArgs := append(c.SSHArgs(true), target, remoteCommand)
+		sshArgs := c.SSHArgs(true)
+		if jump := c.jumpTargetFor(target); jump != "" {
+			sshArgs = append(sshArgs, "-J", jump)
+		}
+		sshArgs = append(sshArgs, target, remoteCommand)
 		out, err = runner.CombinedOutput(ctx, "ssh", sshArgs...)
 	}
 
@@ -86,7 +90,6 @@ func (c *Client) runCommandOnHost(ctx context.Context, host string, args ...stri
 
 	target := ensureRootPrefix(host)
 	remoteCommand := shellJoin(args)
-	c.logCommand(append([]string{"→", target}, args...))
 
 	if ctx == nil {
 		ctx = context.Background()
@@ -97,10 +100,17 @@ func (c *Client) runCommandOnHost(ctx context.Context, host string, args ...stri
 	effective := c.effectiveSSHTarget()
 	var sshArgs []string
 	if effective == "" {
-		sshArgs = append(c.SSHArgs(true), target, remoteCommand)
+		sshArgs = append(c.SSHArgs(true), target)
 	} else {
-		sshArgs = append(c.SSHArgs(true), "-J", effective, target, remoteCommand)
+		jump := c.jumpTargetFor(target)
+		sshArgs = c.SSHArgs(true)
+		if jump != "" {
+			sshArgs = append(sshArgs, "-J", jump)
+		}
+		sshArgs = append(sshArgs, target)
 	}
+	c.logRoutedCommand(sshArgs, args)
+	sshArgs = append(sshArgs, remoteCommand)
 
 	runner := c.runner
 	if runner == nil {
@@ -172,7 +182,6 @@ func (c *Client) TailLogOnHost(ctx context.Context, host, filePath string, n int
 	target := "root@" + host
 	tailCmd := shellJoin(tailArgs)
 
-	c.logCommand(append([]string{"→", target}, tailArgs...))
 	ctxTimeout, cancel := c.commandContext(ctx)
 	defer cancel()
 
@@ -183,10 +192,18 @@ func (c *Client) TailLogOnHost(ctx context.Context, host, filePath string, n int
 		runner = execCommandRunner{}
 	}
 	if effective == "" {
-		sshArgs := append(c.SSHArgs(true), target, tailCmd)
+		sshArgs := append(c.SSHArgs(true), target)
+		c.logRoutedCommand(sshArgs, tailArgs)
+		sshArgs = append(sshArgs, tailCmd)
 		out, err = runner.CombinedOutput(ctxTimeout, "ssh", sshArgs...)
 	} else {
-		sshArgs := append(c.SSHArgs(true), "-J", effective, target, tailCmd)
+		sshArgs := c.SSHArgs(true)
+		if jump := c.jumpTargetFor(target); jump != "" {
+			sshArgs = append(sshArgs, "-J", jump)
+		}
+		sshArgs = append(sshArgs, target)
+		c.logRoutedCommand(sshArgs, tailArgs)
+		sshArgs = append(sshArgs, tailCmd)
 		out, err = runner.CombinedOutput(ctxTimeout, "ssh", sshArgs...)
 	}
 	if err != nil {
@@ -213,16 +230,31 @@ func (c *Client) SSHTargetForHost(host string) (target, jump string) {
 
 	if host == "" || isCurrentExecutionHost(host, effective) {
 		if effective != "" {
-			return effective, ""
+			return effective, c.jumpTargetFor(effective)
 		}
 		return "", ""
 	}
 
 	target = "root@" + host
 	if effective != "" {
-		return target, effective
+		return target, c.jumpTargetFor(target)
 	}
 	return target, ""
+}
+
+// jumpTargetFor keeps the user-supplied SSH target as the stable gateway after
+// MGM discovery. This allows resolved MGM and FST hostnames to remain private
+// to the remote network. Clients constructed only with a resolved target keep
+// the previous behavior of using that target as the jump host for peers.
+func (c *Client) jumpTargetFor(target string) string {
+	if c.sshTarget != "" && !isCurrentExecutionHost(target, c.sshTarget) {
+		return c.sshTarget
+	}
+	effective := c.effectiveSSHTarget()
+	if c.sshTarget == "" && effective != "" && !isCurrentExecutionHost(target, effective) {
+		return effective
+	}
+	return ""
 }
 
 func (c *Client) AcceptNewHostKeys() bool {
@@ -237,10 +269,27 @@ func isCurrentExecutionHost(host, effective string) bool {
 
 	effectiveHost := canonicalHost(strings.TrimPrefix(effective, "root@"))
 	if effectiveHost != "" {
-		return host == effectiveHost
+		return equivalentHostnames(host, effectiveHost)
 	}
 
 	return matchesLocalHost(host)
+}
+
+// equivalentHostnames treats a short hostname and its FQDN as the same host,
+// while avoiding false matches between two different fully qualified domains
+// that happen to share a short label.
+func equivalentHostnames(left, right string) bool {
+	left = canonicalHost(left)
+	right = canonicalHost(right)
+	if left == "" || right == "" {
+		return left == right
+	}
+	if left == right {
+		return true
+	}
+	leftQualified := strings.Contains(left, ".")
+	rightQualified := strings.Contains(right, ".")
+	return (!leftQualified || !rightQualified) && shortHost(left) == shortHost(right)
 }
 
 func matchesLocalHost(host string) bool {

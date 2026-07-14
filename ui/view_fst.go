@@ -72,15 +72,15 @@ func (m model) renderNodesList(width, height int) string {
 		lines = append(lines, summary)
 	}
 
-	if m.fstsLoading {
+	if m.fstsLoading && len(fsts) == 0 {
 		lines = append(lines, "Loading node list...")
-	} else if m.fstsErr != nil {
+	} else if m.fstsErr != nil && len(fsts) == 0 {
 		lines = append(lines, m.styles.error.Render(m.fstsErr.Error()))
 	} else if len(fsts) == 0 {
 		lines = append(lines, "(no fsts)")
 	} else {
 		start, end := visibleWindow(len(fsts), m.fstSelected, max(1, panelContentHeight(height)-len(lines)))
-		lines[0] = title + m.renderNodeControls() + renderScrollSummary(start, end, len(fsts))
+		lines[0] = renderInlineSuffix(title+m.renderNodeControls(), renderScrollSummary(start, end, len(fsts)), contentWidth)
 		for i := start; i < end; i++ {
 			line := formatTableRow(columns, dataRows[i])
 			if i == m.fstSelected {
@@ -90,17 +90,18 @@ func (m model) renderNodesList(width, height int) string {
 		}
 	}
 
-	return m.styles.panel.Width(width).Render(fitLines(lines, panelContentHeight(height)))
+	return m.styles.panel.Width(width).Render(normalizePanelLines(lines, contentWidth, panelContentHeight(height)))
 }
 
 func (m model) renderNodeDetails(width, height int) string {
+	contentWidth := panelContentWidth(width)
 	node, ok := m.selectedNode()
 	if !ok {
-		return m.styles.panelDim.Width(width).Render(fitLines([]string{"No node selected"}, panelContentHeight(height)))
+		return m.styles.panelDim.Width(width).Render(normalizePanelLines([]string{"No node selected"}, contentWidth, panelContentHeight(height)))
 	}
 
 	lines := []string{
-		m.renderSectionTitle("Selected Node", panelContentWidth(width)),
+		m.renderSectionTitle("Selected Node", contentWidth),
 		truncate(node.Host+":"+fmt.Sprintf("%d", node.Port), max(10, width-4)),
 		"",
 		m.metricLine("Type", fallback(node.Type, "-"), "EOS", fallback(node.EOSVersion, "-")),
@@ -113,14 +114,14 @@ func (m model) renderNodeDetails(width, height int) string {
 		m.metricLine("Threads", fmt.Sprintf("%d", node.ThreadCount), "Read MB/s", fmt.Sprintf("%.2f", node.ReadRateMB)),
 		m.metricLine("Write MB/s", fmt.Sprintf("%.2f", node.WriteRateMB), "", ""),
 		"",
-		m.renderSectionTitle("Uptime", panelContentWidth(width)),
+		m.renderSectionTitle("Uptime", contentWidth),
 		truncate(strings.ReplaceAll(node.Uptime, "%20", " "), max(10, width-4)),
 		"",
-		m.renderSectionTitle("Kernel", panelContentWidth(width)),
+		m.renderSectionTitle("Kernel", contentWidth),
 		truncate(node.Kernel, max(10, width-4)),
 	}
 
-	return m.styles.panelDim.Width(width).Render(fitLines(lines, panelContentHeight(height)))
+	return m.styles.panelDim.Width(width).Render(normalizePanelLines(lines, contentWidth, panelContentHeight(height)))
 }
 
 func (m model) selectedNode() (eos.FstRecord, bool) {
@@ -194,7 +195,6 @@ func (m model) renderNodeStatusConfirmPopup() string {
 		confirmBtn = m.styles.selected.Render(confirmBtn)
 	}
 
-	width := max(48, min(110, m.contentWidth()-16))
 	lines := []string{
 		m.styles.popupTitle.Render("Confirm Node State Change"),
 		fmt.Sprintf("Node:   %s", m.styles.value.Render(fmt.Sprintf("%s:%d", m.nodeStatus.host, m.nodeStatus.port))),
@@ -208,15 +208,8 @@ func (m model) renderNodeStatusConfirmPopup() string {
 		"",
 		m.styles.status.Render("g cancel  •  G confirm  •  enter apply  •  esc close"),
 	}
-	for i := range lines {
-		lines[i] = padVisibleWidth(lines[i], width)
-	}
-
-	return m.styles.panel.
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("196")).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	preferredWidth := max(48, min(110, m.contentWidth()-16))
+	return m.renderModal(lines, lipgloss.Color("196"), preferredWidth)
 }
 
 func (m model) renderFstHeaderRow(columns []tableColumn) string {

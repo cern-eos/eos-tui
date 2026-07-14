@@ -2,7 +2,6 @@ package eos
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -34,7 +33,7 @@ func (c *Client) Groups(ctx context.Context) ([]GroupRecord, error) {
 		} `json:"result"`
 	}
 
-	if err := json.Unmarshal(stripEOSPreamble(output), &payload); err != nil {
+	if err := unmarshalEOSJSON(output, &payload); err != nil {
 		return nil, fmt.Errorf("parse group ls: %w (output: %.200s)", err, output)
 	}
 

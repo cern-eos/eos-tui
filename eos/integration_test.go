@@ -119,9 +119,28 @@ func TestIntegrationNamespaceStats(t *testing.T) {
 	if stats.TotalDirectories == 0 {
 		t.Error("expected non-zero TotalDirectories")
 	}
+	if stats.CurrentFID == 0 {
+		t.Error("expected non-zero CurrentFID")
+	}
+	if stats.CurrentCID == 0 {
+		t.Error("expected non-zero CurrentCID")
+	}
+	if stats.MasterHost == "" {
+		t.Error("expected non-empty MasterHost")
+	}
+	if stats.CacheFilesMax == 0 {
+		t.Error("expected non-zero CacheFilesMax")
+	}
+	if stats.CacheContainersMax == 0 {
+		t.Error("expected non-zero CacheContainersMax")
+	}
+	// Request and hit counters are activity metrics. A newly started or idle
+	// namespace can legitimately report zero, so their values are useful to log
+	// but are not integration-test health requirements.
 
-	t.Logf("NamespaceStats: files=%d dirs=%d fid=%d cid=%d master=%q",
-		stats.TotalFiles, stats.TotalDirectories, stats.CurrentFID, stats.CurrentCID, stats.MasterHost)
+	t.Logf("NamespaceStats: files=%d dirs=%d fid=%d cid=%d master=%q file_cache=%d/%d container_cache=%d/%d",
+		stats.TotalFiles, stats.TotalDirectories, stats.CurrentFID, stats.CurrentCID, stats.MasterHost,
+		stats.CacheFilesRequests, stats.CacheFilesMax, stats.CacheContainersRequests, stats.CacheContainersMax)
 }
 
 func TestIntegrationEOSVersion(t *testing.T) {
@@ -184,7 +203,18 @@ func TestIntegrationDiscoverMGMMaster(t *testing.T) {
 		t.Errorf("expected resolved target to start with root@, got %q", resolved)
 	}
 
-	t.Logf("DiscoverMGMMaster: resolved to %q", resolved)
+	// Exercise the post-discovery route as well as the lookup itself. When the
+	// configured target is an SSH alias/bastion, the resolved private MGM must
+	// remain reachable through that original gateway.
+	version, err := c.EOSVersion(context.Background())
+	if err != nil {
+		t.Fatalf("EOSVersion() after discovery error: %v", err)
+	}
+	if version == "" {
+		t.Fatal("expected non-empty EOS version after discovery")
+	}
+
+	t.Logf("DiscoverMGMMaster: resolved to %q, post-discovery EOS version %q", resolved, version)
 }
 
 func TestIntegrationAllComponentsLoad(t *testing.T) {

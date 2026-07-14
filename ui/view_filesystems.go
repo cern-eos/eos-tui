@@ -84,15 +84,15 @@ func (m model) renderFileSystemsList(width, height int) string {
 		lines = append(lines, summary)
 	}
 
-	if m.fileSystemsLoading {
+	if m.fileSystemsLoading && len(fileSystems) == 0 {
 		lines = append(lines, "Loading filesystem state...")
-	} else if m.fileSystemsErr != nil {
+	} else if m.fileSystemsErr != nil && len(fileSystems) == 0 {
 		lines = append(lines, m.styles.error.Render(m.fileSystemsErr.Error()))
 	} else if len(fileSystems) == 0 {
 		lines = append(lines, "(no filesystems)")
 	} else {
 		start, end := visibleWindow(len(fileSystems), m.fsSelected, max(1, panelContentHeight(height)-len(lines)))
-		lines[0] = title + m.renderFileSystemControls() + renderScrollSummary(start, end, len(fileSystems))
+		lines[0] = renderInlineSuffix(title+m.renderFileSystemControls(), renderScrollSummary(start, end, len(fileSystems)), contentWidth)
 		for i := start; i < end; i++ {
 			line := formatTableRow(columns, dataRows[i])
 			if i == m.fsSelected {
@@ -102,17 +102,18 @@ func (m model) renderFileSystemsList(width, height int) string {
 		}
 	}
 
-	return m.styles.panel.Width(width).Render(fitLines(lines, panelContentHeight(height)))
+	return m.styles.panel.Width(width).Render(normalizePanelLines(lines, contentWidth, panelContentHeight(height)))
 }
 
 func (m model) renderFileSystemDetails(width, height int) string {
+	contentWidth := panelContentWidth(width)
 	fs, ok := m.selectedFileSystem()
 	if !ok {
-		return m.styles.panelDim.Width(width).Render(fitLines([]string{"No filesystem selected"}, panelContentHeight(height)))
+		return m.styles.panelDim.Width(width).Render(normalizePanelLines([]string{"No filesystem selected"}, contentWidth, panelContentHeight(height)))
 	}
 
 	lines := []string{
-		m.renderSectionTitle("Selected Filesystem", panelContentWidth(width)),
+		m.renderSectionTitle("Selected Filesystem", contentWidth),
 		truncate(fmt.Sprintf("%s:%d", fs.Host, fs.Port), max(10, width-4)),
 		"",
 		m.metricLine("ID", fmt.Sprintf("%d", fs.ID), "Group", fallback(fs.SchedGroup, "-")),
@@ -124,11 +125,11 @@ func (m model) renderFileSystemDetails(width, height int) string {
 		m.metricLine("BW", fmt.Sprintf("%.0f MB/s", fs.DiskBWMB), "IOPS", fmt.Sprintf("%.0f", fs.DiskIOPS)),
 		m.metricLine("Read", fmt.Sprintf("%.2f MB/s", fs.ReadRateMB), "Write", fmt.Sprintf("%.2f MB/s", fs.WriteRateMB)),
 		"",
-		m.renderSectionTitle("Mount Path", panelContentWidth(width)),
+		m.renderSectionTitle("Mount Path", contentWidth),
 		truncate(fs.Path, max(10, width-4)),
 	}
 
-	return m.styles.panelDim.Width(width).Render(fitLines(lines, panelContentHeight(height)))
+	return m.styles.panelDim.Width(width).Render(normalizePanelLines(lines, contentWidth, panelContentHeight(height)))
 }
 
 func (m model) selectedFileSystem() (eos.FileSystemRecord, bool) {
@@ -206,11 +207,7 @@ func (m model) renderFSConfigStatusEditPopup() string {
 			"",
 			m.styles.status.Render("g cancel  •  G confirm  •  enter apply  •  esc cancel"),
 		}
-		return m.styles.panel.
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("196")).
-			Padding(1, 2).
-			Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+		return m.renderModal(lines, lipgloss.Color("196"), 0)
 	}
 
 	lines := []string{
@@ -242,11 +239,7 @@ func (m model) renderFSConfigStatusEditPopup() string {
 		hint = "↑↓ select  •  g/G home/end  •  enter continue  •  esc cancel"
 	}
 	lines = append(lines, "", m.styles.status.Render(hint))
-	return m.styles.panel.
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("62")).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return m.renderModal(lines, lipgloss.Color("62"), 0)
 }
 
 func apollonDrainRemoteArgs(fsID uint64, instance string) []string {
@@ -364,11 +357,7 @@ func (m model) renderApollonDrainConfirmPopup() string {
 		m.styles.status.Render("g cancel  •  G confirm  •  enter apply  •  esc close"),
 	)
 
-	return m.styles.panel.
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("196")).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return m.renderModal(lines, lipgloss.Color("196"), 0)
 }
 
 func (m model) renderErrorAlert() string {
@@ -394,11 +383,7 @@ func (m model) renderErrorAlert() string {
 		lines = append(lines, ansi.Truncate(msgLine, maxContentWidth, "…"))
 	}
 	lines = append(lines, "", m.styles.status.Render(footer))
-	return m.styles.panel.
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("196")).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return m.renderModal(lines, lipgloss.Color("196"), 0)
 }
 
 func (m model) renderFileSystemHeaderRow(columns []tableColumn) string {

@@ -1189,10 +1189,11 @@ func (m *model) updatePopupRows() {
 	if len(rows) == 0 {
 		rows = []table.Row{{"(no matches)"}}
 	}
-	m.popup.table.SetColumns([]table.Column{{Title: "value", Width: min(60, max(24, m.contentWidth()-16))}})
+	popupWidth := min(70, max(1, m.contentWidth()-4))
+	m.popup.table.SetColumns([]table.Column{{Title: "value", Width: max(1, popupWidth-4)}})
 	m.popup.table.SetRows(rows)
 	m.popup.table.SetHeight(min(14, max(6, m.height/3)))
-	m.popup.table.SetWidth(min(70, max(28, m.contentWidth()-12)))
+	m.popup.table.SetWidth(popupWidth)
 	m.popup.table.SetCursor(0)
 }
 

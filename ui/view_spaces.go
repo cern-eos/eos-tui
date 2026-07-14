@@ -58,15 +58,15 @@ func (m model) renderSpacesList(width, height int) string {
 		m.renderSpaceHeaderRow(columns),
 	}
 
-	if m.spacesLoading {
+	if m.spacesLoading && len(spaces) == 0 {
 		lines = append(lines, "Loading spaces...")
-	} else if m.spacesErr != nil {
+	} else if m.spacesErr != nil && len(spaces) == 0 {
 		lines = append(lines, m.styles.error.Render(m.spacesErr.Error()))
 	} else if len(spaces) == 0 {
 		lines = append(lines, "(no spaces)")
 	} else {
 		start, end := visibleWindow(len(spaces), m.spacesSelected, max(1, panelContentHeight(height)-len(lines)))
-		lines[0] = title + renderScrollSummary(start, end, len(spaces))
+		lines[0] = renderInlineSuffix(title, renderScrollSummary(start, end, len(spaces)), contentWidth)
 		for i := start; i < end; i++ {
 			line := formatTableRow(columns, dataRows[i])
 			if i == m.spacesSelected {
@@ -76,19 +76,20 @@ func (m model) renderSpacesList(width, height int) string {
 		}
 	}
 
-	return m.styles.panel.Width(width).Render(fitLines(lines, panelContentHeight(height)))
+	return m.styles.panel.Width(width).Render(normalizePanelLines(lines, contentWidth, panelContentHeight(height)))
 }
 
 func (m model) renderSpaceDetails(width, height int) string {
+	contentWidth := panelContentWidth(width)
 	spaces := m.visibleSpaces()
 	if len(spaces) == 0 || m.spacesSelected >= len(spaces) {
-		return m.styles.panelDim.Width(width).Render(fitLines([]string{"No space selected"}, panelContentHeight(height)))
+		return m.styles.panelDim.Width(width).Render(normalizePanelLines([]string{"No space selected"}, contentWidth, panelContentHeight(height)))
 	}
 
 	space := spaces[m.spacesSelected]
 
 	lines := []string{
-		m.renderSectionTitle("Selected Space", panelContentWidth(width)),
+		m.renderSectionTitle("Selected Space", contentWidth),
 		truncate(space.Name, max(10, width-4)),
 		"",
 		m.metricLine("Type", space.Type, "Status", space.Status),
@@ -98,7 +99,7 @@ func (m model) renderSpaceDetails(width, height int) string {
 		m.metricLine("Free", humanBytes(space.FreeBytes), "", ""),
 	}
 
-	return m.styles.panelDim.Width(width).Render(fitLines(lines, panelContentHeight(height)))
+	return m.styles.panelDim.Width(width).Render(normalizePanelLines(lines, contentWidth, panelContentHeight(height)))
 }
 
 func (m model) renderSpaceHeaderRow(columns []tableColumn) string {

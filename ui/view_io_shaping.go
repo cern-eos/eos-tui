@@ -116,7 +116,7 @@ func (m model) renderIOShapingView(height int) string {
 		indicator = m.styles.status.Render("  ↻")
 	}
 
-	if m.ioShapingErr != nil {
+	if m.ioShapingErr != nil && len(m.ioShapingMergedRows()) == 0 {
 		message := m.ioShapingErr.Error()
 		if errors.Is(m.ioShapingErr, eos.ErrIOShapingUnsupported) {
 			message = "IO traffic shaping is not available on this EOS instance.\nThe `io shaping` subcommand is missing — check `eos io --help` on the MGM."
@@ -126,7 +126,7 @@ func (m model) renderIOShapingView(height int) string {
 			"",
 			m.styles.error.Render(message),
 		}
-		return m.styles.panelDim.Width(width).Render(fitLines(lines, height))
+		return m.styles.panelDim.Width(width).Render(normalizePanelLines(lines, contentWidth, height))
 	}
 
 	rows := m.ioShapingMergedRows()
@@ -213,7 +213,7 @@ func (m model) renderIOShapingView(height int) string {
 		lines = append(lines, "(no data)")
 	} else {
 		start, end := visibleWindow(len(rows), m.ioShapingSelected, max(1, height-len(lines)))
-		lines[0] = title + renderScrollSummary(start, end, len(rows))
+		lines[0] = renderInlineSuffix(title, renderScrollSummary(start, end, len(rows)), contentWidth)
 		for i := start; i < end; i++ {
 			line := formatTableRow(columns, dataRows[i])
 			if i == m.ioShapingSelected {
@@ -223,7 +223,7 @@ func (m model) renderIOShapingView(height int) string {
 		}
 	}
 
-	return m.styles.panel.Width(width).Render(fitLines(lines, height))
+	return m.styles.panel.Width(width).Render(normalizePanelLines(lines, contentWidth, height))
 }
 
 func (m model) renderIOShapingPressureView(height int) string {
@@ -235,7 +235,7 @@ func (m model) renderIOShapingPressureView(height int) string {
 		indicator = m.styles.status.Render("  ↻")
 	}
 
-	if m.ioShapingErr != nil {
+	if m.ioShapingErr != nil && len(m.ioShapingPressure) == 0 {
 		message := m.ioShapingErr.Error()
 		if errors.Is(m.ioShapingErr, eos.ErrIOShapingUnsupported) {
 			message = "IO shaping pressure is not available on this EOS instance.\nThe `io shaping pressure ls` subcommand is missing on the MGM."
@@ -245,16 +245,10 @@ func (m model) renderIOShapingPressureView(height int) string {
 			"",
 			m.styles.error.Render(message),
 		}
-		return m.styles.panelDim.Width(width).Render(fitLines(lines, height))
+		return m.styles.panelDim.Width(width).Render(normalizePanelLines(lines, contentWidth, height))
 	}
 
-	records := append([]eos.IOShapingPressureRecord(nil), m.ioShapingPressure...)
-	sort.Slice(records, func(i, j int) bool {
-		if records[i].App == records[j].App {
-			return records[i].NodeID < records[j].NodeID
-		}
-		return records[i].App < records[j].App
-	})
+	records := m.sortedIOShapingPressure()
 
 	dataRows := make([][]string, len(records))
 	for i, r := range records {
@@ -313,7 +307,7 @@ func (m model) renderIOShapingPressureView(height int) string {
 		lines = append(lines, "(no pressure data)")
 	} else {
 		start, end := visibleWindow(len(records), m.ioShapingSelected, max(1, height-len(lines)))
-		lines[0] = title + renderScrollSummary(start, end, len(records))
+		lines[0] = renderInlineSuffix(title, renderScrollSummary(start, end, len(records)), contentWidth)
 		for i := start; i < end; i++ {
 			line := formatTableRow(columns, dataRows[i])
 			if i == m.ioShapingSelected {
@@ -323,7 +317,18 @@ func (m model) renderIOShapingPressureView(height int) string {
 		}
 	}
 
-	return m.styles.panel.Width(width).Render(fitLines(lines, height))
+	return m.styles.panel.Width(width).Render(normalizePanelLines(lines, contentWidth, height))
+}
+
+func (m model) sortedIOShapingPressure() []eos.IOShapingPressureRecord {
+	records := append([]eos.IOShapingPressureRecord(nil), m.ioShapingPressure...)
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].App == records[j].App {
+			return records[i].NodeID < records[j].NodeID
+		}
+		return records[i].App < records[j].App
+	})
+	return records
 }
 
 func ioShapingPressureFlags(r eos.IOShapingPressureRecord) string {

@@ -572,11 +572,43 @@ func TestStripEOSPreambleMultipleStarLines(t *testing.T) {
 }
 
 func TestStripEOSPreamblePreservesTrailingContent(t *testing.T) {
-	// A trailing * line after JSON should not truncate JSON.
-	input := "{\"result\":[{\"name\":\"default\"}]}"
+	input := "{\"result\":[{\"name\":\"default\"}]}\n* info: cached response\n"
 	got := string(stripEOSPreamble([]byte(input)))
-	if !strings.Contains(got, "default") {
-		t.Errorf("expected JSON content preserved, got %q", got)
+	if got != `{"result":[{"name":"default"}]}` {
+		t.Errorf("expected only JSON content, got %q", got)
+	}
+}
+
+func TestStripEOSPreambleSkipsBracketedNonJSONBanner(t *testing.T) {
+	input := "[ssh gateway notice]\n* info\n{\"result\":[]}\n"
+	if got := string(stripEOSPreamble([]byte(input))); got != `{"result":[]}` {
+		t.Fatalf("stripEOSPreamble() = %q, want later JSON payload", got)
+	}
+}
+
+func TestUnmarshalEOSJSONRejectsZeroExitErrorEnvelope(t *testing.T) {
+	input := []byte(`{"errormsg":"error: cannot stat '/missing'\n","fileinfo":null,"retc":"2"}`)
+	var payload map[string]any
+	if err := unmarshalEOSJSON(input, &payload); err == nil || !strings.Contains(err.Error(), "cannot stat") {
+		t.Fatalf("unmarshalEOSJSON() error = %v, want retc error", err)
+	}
+}
+
+func TestUnmarshalEOSJSONRejectsTrailingErrorAnnotation(t *testing.T) {
+	input := []byte("{\"result\":[]}\n* error: backend request failed\n")
+	var payload map[string]any
+	if err := unmarshalEOSJSON(input, &payload); err == nil || !strings.Contains(err.Error(), "backend request failed") {
+		t.Fatalf("unmarshalEOSJSON() error = %v, want trailing error", err)
+	}
+}
+
+func TestFileInfoRejectsEOSRetcWhenProcessExitsZero(t *testing.T) {
+	runner := &recordingRunner{out: []byte(`{"errormsg":"error: cannot stat '/missing'\n","fileinfo":null,"retc":"2"}`)}
+	client := &Client{timeout: time.Second, runner: runner}
+
+	_, err := client.StatPath(context.Background(), "/missing")
+	if err == nil || !strings.Contains(err.Error(), "cannot stat") {
+		t.Fatalf("StatPath() error = %v, want EOS retc error", err)
 	}
 }
 
@@ -1240,6 +1272,19 @@ func TestSSHTargetForHostRemoteDifferentHost(t *testing.T) {
 	}
 }
 
+func TestSSHTargetForHostUsesOriginalGatewayAfterDiscovery(t *testing.T) {
+	c := &Client{sshTarget: "cluster-gateway", resolvedSSHTarget: "root@private-mgm.cern.ch"}
+	target, jump := c.SSHTargetForHost("fst01.cern.ch")
+	if target != "root@fst01.cern.ch" || jump != "cluster-gateway" {
+		t.Fatalf("target=%q jump=%q, want FST via original gateway", target, jump)
+	}
+
+	target, jump = c.SSHTargetForHost("private-mgm.cern.ch")
+	if target != "root@private-mgm.cern.ch" || jump != "cluster-gateway" {
+		t.Fatalf("MGM target=%q jump=%q, want resolved MGM via original gateway", target, jump)
+	}
+}
+
 func TestSSHArgsDefault(t *testing.T) {
 	c := &Client{}
 
@@ -1889,6 +1934,25 @@ uid=all gid=all is_master=true master_id=legacy-mgm.cern.ch:1094
 	}
 }
 
+func TestCommandsKeepOriginalSSHTargetAsGatewayAfterDiscovery(t *testing.T) {
+	runner := &recordingRunner{out: []byte(`uid=all gid=all ns.mgm.leader=private-mgm.cern.ch:1094`)}
+	c := &Client{sshTarget: "cluster-gateway", timeout: time.Second, runner: runner}
+	if _, err := c.DiscoverMGMMaster(context.Background()); err != nil {
+		t.Fatalf("DiscoverMGMMaster() error: %v", err)
+	}
+
+	if _, err := c.runCommandContext(context.Background(), "eos", "version"); err != nil {
+		t.Fatalf("post-discovery command error: %v", err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls = %d, want discovery plus command", len(runner.calls))
+	}
+	args := strings.Join(runner.calls[1].args, " ")
+	if !strings.Contains(args, "-J cluster-gateway") || !strings.Contains(args, "root@private-mgm.cern.ch") {
+		t.Fatalf("post-discovery route does not retain gateway: %v", runner.calls[1].args)
+	}
+}
+
 func TestRunCommandContextReportsContextDeadline(t *testing.T) {
 	c := &Client{
 		timeout: time.Nanosecond,
@@ -1942,7 +2006,7 @@ func TestQDBAttemptCoupRunsOnSelectedHost(t *testing.T) {
 	}
 	joinedArgs := strings.Join(call.args, " ")
 	for _, want := range []string{
-		"-J root@mgm01.cern.ch",
+		"-J mgm01.cern.ch",
 		"root@qdb01.cern.ch",
 		"redis-cli",
 		"-p",
@@ -1952,6 +2016,22 @@ func TestQDBAttemptCoupRunsOnSelectedHost(t *testing.T) {
 		if !strings.Contains(joinedArgs, want) {
 			t.Fatalf("expected ssh args to contain %q, got %v", want, call.args)
 		}
+	}
+	if strings.Contains(joinedArgs, " '-e' ") {
+		t.Fatalf("QDB coup unexpectedly requires redis-cli 6.2 -e support: %v", call.args)
+	}
+}
+
+func TestQDBAttemptCoupRejectsRedisErrorWithZeroExitStatus(t *testing.T) {
+	runner := &recordingRunner{out: []byte("ERR not a member of the cluster\n")}
+	c := &Client{timeout: time.Second, runner: runner}
+
+	out, err := c.QDBAttemptCoup(context.Background(), "qdb01.cern.ch")
+	if err == nil || !strings.Contains(err.Error(), "not a member") {
+		t.Fatalf("QDBAttemptCoup() error = %v, want redis error", err)
+	}
+	if string(out) != "ERR not a member of the cluster\n" {
+		t.Fatalf("expected original command output, got %q", out)
 	}
 }
 

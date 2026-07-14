@@ -191,6 +191,7 @@ func (m model) setActiveLogTarget(target logTarget, loading bool) model {
 	m.log.err = nil
 	m.log.notice = ""
 	m.log.loading = loading
+	m.log.inFlight = loading
 	m.log.allLines = nil
 	m.log.filtered = nil
 	m.log.vp.SetContent("Loading...")
@@ -203,8 +204,15 @@ func (m model) switchLogSource(delta int) (tea.Model, tea.Cmd) {
 	}
 	m.log.sourceIndex = (m.log.sourceIndex + delta + len(m.log.logSources)) % len(m.log.logSources)
 	target := m.log.logSources[m.log.sourceIndex]
+	m.logGeneration++
 	m = m.setActiveLogTarget(target, true)
-	return m, loadLogCmd(m.client, target)
+	if m.log.tailing {
+		return m, tea.Batch(
+			loadLogCmd(m.client, target, m.logGeneration),
+			logTickCmd(m.logGeneration),
+		)
+	}
+	return m, loadLogCmd(m.client, target, m.logGeneration)
 }
 
 func (m model) openLogOverlay() (tea.Model, tea.Cmd) {
@@ -217,6 +225,7 @@ func (m model) openLogOverlay() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	target := targets[0]
+	m.logGeneration++
 
 	logInput := textinput.New()
 	logInput.Prompt = "grep> "
@@ -235,7 +244,10 @@ func (m model) openLogOverlay() (tea.Model, tea.Cmd) {
 		input:       logInput,
 	}
 	m = m.setActiveLogTarget(target, true)
-	return m, tea.Batch(loadLogCmd(m.client, target), logTickCmd())
+	return m, tea.Batch(
+		loadLogCmd(m.client, target, m.logGeneration),
+		logTickCmd(m.logGeneration),
+	)
 }
 
 func (m model) logViewportWidth() int {

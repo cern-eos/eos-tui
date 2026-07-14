@@ -57,15 +57,15 @@ func (m model) renderGroupsList(width, height int) string {
 		m.renderGroupHeaderRow(columns),
 	}
 
-	if m.groupsLoading {
+	if m.groupsLoading && len(groups) == 0 {
 		lines = append(lines, "Loading groups...")
-	} else if m.groupsErr != nil {
+	} else if m.groupsErr != nil && len(groups) == 0 {
 		lines = append(lines, m.styles.error.Render(m.groupsErr.Error()))
 	} else if len(groups) == 0 {
 		lines = append(lines, "(no groups)")
 	} else {
 		start, end := visibleWindow(len(groups), m.groupsSelected, max(1, panelContentHeight(height)-len(lines)))
-		lines[0] = title + renderScrollSummary(start, end, len(groups))
+		lines[0] = renderInlineSuffix(title, renderScrollSummary(start, end, len(groups)), contentWidth)
 		for i := start; i < end; i++ {
 			g := groups[i]
 			row := []string{
@@ -85,7 +85,7 @@ func (m model) renderGroupsList(width, height int) string {
 		}
 	}
 
-	return m.styles.panel.Width(width).Render(fitLines(lines, panelContentHeight(height)))
+	return m.styles.panel.Width(width).Render(normalizePanelLines(lines, contentWidth, panelContentHeight(height)))
 }
 
 func (m model) renderGroupHeaderRow(columns []tableColumn) string {
@@ -96,7 +96,7 @@ func (m model) renderGroupHeaderRow(columns []tableColumn) string {
 func (m model) renderGroupDetails(width, height int) string {
 	groups := m.visibleGroups()
 	if len(groups) == 0 || m.groupsSelected < 0 || m.groupsSelected >= len(groups) {
-		return m.styles.panelDim.Width(width).Render(fitLines([]string{"no group selected"}, panelContentHeight(height)))
+		return m.styles.panelDim.Width(width).Render(normalizePanelLines([]string{"no group selected"}, panelContentWidth(width), panelContentHeight(height)))
 	}
 
 	g := groups[m.groupsSelected]
@@ -109,7 +109,7 @@ func (m model) renderGroupDetails(width, height int) string {
 		m.metricLine("Free", humanBytes(g.FreeBytes), "Files", fmt.Sprintf("%d", g.NumFiles)),
 	}
 
-	return m.styles.panelDim.Width(width).Render(fitLines(lines, panelContentHeight(height)))
+	return m.styles.panelDim.Width(width).Render(normalizePanelLines(lines, panelContentWidth(width), panelContentHeight(height)))
 }
 
 func (m model) selectedGroup() (eos.GroupRecord, bool) {
@@ -187,11 +187,7 @@ func (m model) renderGroupDrainConfirmPopup() string {
 			m.styles.status.Render("g cancel  •  G confirm  •  enter apply  •  esc cancel"),
 		}
 
-		return m.styles.panel.
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("196")).
-			Padding(1, 2).
-			Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+		return m.renderModal(lines, lipgloss.Color("196"), 0)
 	}
 
 	lines := []string{
@@ -222,9 +218,5 @@ func (m model) renderGroupDrainConfirmPopup() string {
 	}
 	lines = append(lines, "", m.styles.status.Render(hint))
 
-	return m.styles.panel.
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("196")).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return m.renderModal(lines, lipgloss.Color("196"), 0)
 }

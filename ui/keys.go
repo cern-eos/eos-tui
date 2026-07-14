@@ -161,6 +161,10 @@ func (m model) updateFileSystemKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateNamespaceKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.namespaceNavigationLoading() {
+		m.status = fmt.Sprintf("Opening %s; wait for the directory request to finish", m.nsRequestedPath)
+		return m, nil
+	}
 	half := max(1, m.height/6)
 	entries := m.visibleNamespaceEntries()
 	selectionChanged := false
@@ -195,9 +199,8 @@ func (m model) updateNamespaceKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if parent != m.directory.Path {
 			m.nsFilter.filters = map[int]string{}
 			m.nsSelected = 0
-			m.nsLoading = true
 			m.status = fmt.Sprintf("Opening %s...", parent)
-			return m, loadDirectoryCmd(m.client, parent)
+			return m.requestDirectory(parent)
 		}
 	case "enter", "a":
 		return m.startNamespaceAttrEdit()
@@ -210,9 +213,8 @@ func (m model) updateNamespaceKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if ok && entry.Kind == eos.EntryKindContainer {
 			m.nsFilter.filters = map[int]string{}
 			m.nsSelected = 0
-			m.nsLoading = true
 			m.status = fmt.Sprintf("Opening %s...", entry.Path)
-			return m, loadDirectoryCmd(m.client, entry.Path)
+			return m.requestDirectory(entry.Path)
 		}
 	}
 
@@ -251,8 +253,8 @@ func (m model) updateNamespaceStatsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "Stats detail filters cleared"
 		}
 	case "left", "h":
-		if m.statsPaneFocus == statsFocusDetail && hasTable {
-			if m.statsDetailColumnSelected > 0 {
+		if m.statsPaneFocus == statsFocusDetail {
+			if hasTable && m.statsDetailColumnSelected > 0 {
 				m.statsDetailColumnSelected--
 				m.status = fmt.Sprintf("Selected stats column: %s", m.statsFilterColumnLabel(m.statsDetailColumnSelected))
 			} else {
@@ -262,11 +264,13 @@ func (m model) updateNamespaceStatsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "right", "l":
 		if m.statsPaneFocus == statsFocusList {
+			m.statsPaneFocus = statsFocusDetail
 			if hasTable {
-				m.statsPaneFocus = statsFocusDetail
 				m.statsDetailSelected = min(m.statsDetailSelected, maxDetailSelected)
 				m.statsDetailColumnSelected = min(m.statsDetailColumnSelected, len(sections[m.statsSectionSelected].table.columns)-1)
 				m.status = fmt.Sprintf("Focused stats details (%s)", m.statsFilterColumnLabel(m.statsDetailColumnSelected))
+			} else {
+				m.status = "Focused stats details"
 			}
 		} else if hasTable && m.statsDetailColumnSelected < len(sections[m.statsSectionSelected].table.columns)-1 {
 			m.statsDetailColumnSelected++
@@ -320,7 +324,6 @@ func (m model) updateNamespaceStatsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if hasTable && len(sections) > 0 && sections[m.statsSectionSelected].table != nil {
 		m.statsDetailColumnSelected = min(max(0, m.statsDetailColumnSelected), len(sections[m.statsSectionSelected].table.columns)-1)
 	} else {
-		m.statsPaneFocus = statsFocusList
 		m.statsDetailColumnSelected = 0
 	}
 	m.statsDetailSelected = min(max(0, m.statsDetailSelected), max(0, m.statsDetailLineCount(sections)-1))
@@ -438,9 +441,8 @@ func (m model) updateNamespaceGoToKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.nsFilter.filters = map[int]string{}
 		m.nsSelected = 0
-		m.nsLoading = true
 		m.status = fmt.Sprintf("Opening %s...", target)
-		return m, loadDirectoryCmd(m.client, target)
+		return m.requestDirectory(target)
 	}
 
 	var cmd tea.Cmd
@@ -566,46 +568,25 @@ func (m model) updateIOShapingKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "a":
-		if m.ioShapingMode != eos.IOShapingApps {
-			m.ioShapingMode = eos.IOShapingApps
-			m.ioShapingSelected = 0
-			m.ioShapingLoading = true
-			return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
-		}
+		return m.changeIOShapingMode(eos.IOShapingApps)
 	case "u":
-		if m.ioShapingMode != eos.IOShapingUsers {
-			m.ioShapingMode = eos.IOShapingUsers
-			m.ioShapingSelected = 0
-			m.ioShapingLoading = true
-			return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
-		}
+		return m.changeIOShapingMode(eos.IOShapingUsers)
 	case "g":
-		if m.ioShapingMode != eos.IOShapingGroups {
-			m.ioShapingMode = eos.IOShapingGroups
-			m.ioShapingSelected = 0
-			m.ioShapingLoading = true
-			return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
-		}
+		return m.changeIOShapingMode(eos.IOShapingGroups)
 	case "n":
-		if m.ioShapingMode != eos.IOShapingNodes {
-			m.ioShapingMode = eos.IOShapingNodes
-			m.ioShapingSelected = 0
-			m.ioShapingLoading = true
-			return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
-		}
+		return m.changeIOShapingMode(eos.IOShapingNodes)
 	case "p":
-		if m.ioShapingMode != eos.IOShapingPressure {
-			m.ioShapingMode = eos.IOShapingPressure
-			m.ioShapingSelected = 0
-			m.ioShapingLoading = true
-			return m, tea.Batch(loadIOShapingViewCmd(m.client, m.ioShapingMode), loadIOShapingPolicyDataCmd(m.client, m.ioShapingMode))
-		}
+		return m.changeIOShapingMode(eos.IOShapingPressure)
 	case "N":
 		return m.startIOShapingPolicyCreate()
 	case "m":
 		if !m.ioShapingConfigLoaded {
 			m.status = "Loading IO shaping controller limits state..."
-			return m, loadIOShapingConfigCmd(m.client)
+			if m.ioShapingConfigLoading {
+				return m, nil
+			}
+			m.ioShapingConfigLoading = true
+			return m, loadIOShapingConfigCmd(m.client, m.ioShapingGeneration)
 		}
 		nextEnabled := !m.ioShapingConfig.LimitsEnabled
 		if nextEnabled {
@@ -635,6 +616,25 @@ func (m model) updateIOShapingKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.ioShapingSelected = clampIndex(m.ioShapingSelected, rowCount)
 	return m, nil
+}
+
+func (m model) changeIOShapingMode(mode eos.IOShapingMode) (tea.Model, tea.Cmd) {
+	if m.ioShapingMode == mode {
+		return m, nil
+	}
+	m.ioShapingGeneration++
+	m.ioShapingMode = mode
+	m.ioShapingSelected = 0
+	m.ioShaping = nil
+	m.ioShapingPressure = nil
+	m.ioShapingPolicies = nil
+	m.ioShapingLoading = true
+	m.ioShapingErr = nil
+	m.markIOShapingPolicyLoading()
+	return m, tea.Batch(
+		loadIOShapingViewCmd(m.client, mode, m.ioShapingGeneration),
+		loadIOShapingPolicyDataCmd(m.client, mode, m.ioShapingGeneration),
+	)
 }
 
 func (m model) updateGroupKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -675,19 +675,9 @@ func (m model) updateVIDKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	half := max(1, m.height/6)
 	switch msg.String() {
 	case "left", "h":
-		m.vidMode = m.vidMode.next(-1)
-		m.vidSelected = 0
-		m.vidLoading = true
-		m.vidErr = nil
-		m.status = fmt.Sprintf("Loading VID scope %s...", m.vidMode.label())
-		return m, loadVIDCmd(m.client, m.vidMode)
-	case "right":
-		m.vidMode = m.vidMode.next(1)
-		m.vidSelected = 0
-		m.vidLoading = true
-		m.vidErr = nil
-		m.status = fmt.Sprintf("Loading VID scope %s...", m.vidMode.label())
-		return m, loadVIDCmd(m.client, m.vidMode)
+		return m.changeVIDMode(m.vidMode.next(-1))
+	case "right", "l":
+		return m.changeVIDMode(m.vidMode.next(1))
 	case "up", "k":
 		if m.vidSelected > 0 {
 			m.vidSelected--
@@ -707,6 +697,20 @@ func (m model) updateVIDKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m model) changeVIDMode(mode vidListMode) (tea.Model, tea.Cmd) {
+	if mode == m.vidMode {
+		return m, nil
+	}
+	m.vidGeneration++
+	m.vidMode = mode
+	m.vidRecords = nil
+	m.vidSelected = 0
+	m.vidLoading = true
+	m.vidErr = nil
+	m.status = fmt.Sprintf("Loading VID scope %s...", mode.label())
+	return m, loadVIDCmd(m.client, mode, m.vidGeneration)
 }
 
 func (m model) updateAccessKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -930,7 +934,12 @@ func (m model) updateSpaceStatusEditKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		} else if m.edit.stage == editStageConfirm {
 			if m.edit.button == buttonContinue {
-				return m, runSpaceConfigCmd(m.client, m.edit.space, m.edit.record.Key, m.edit.input.Value())
+				space := m.edit.space
+				key := m.edit.record.Key
+				value := m.edit.input.Value()
+				m.edit.active = false
+				m.status = fmt.Sprintf("Updating %s on space %s...", key, space)
+				return m, runSpaceConfigCmd(m.client, space, key, value)
 			}
 		}
 	}
@@ -1097,11 +1106,14 @@ func (m model) updateLogKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.log.filtering {
 		switch msg.String() {
 		case "ctrl+c":
+			m.logGeneration++
 			m.log = logOverlay{}
 			return m, nil
 		case "esc":
 			m.log.filtering = false
 			m.log.input.Blur()
+			m.log.filtered = applyLogFilter(m.log.allLines, m.log.filter)
+			m.refreshLogViewportContent(false)
 		case "enter":
 			m.log.filtering = false
 			m.log.input.Blur()
@@ -1124,6 +1136,7 @@ func (m model) updateLogKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Normal navigation.
 	switch msg.String() {
 	case "ctrl+c", "esc", "q":
+		m.logGeneration++
 		m.log = logOverlay{}
 	case "/":
 		m.log.filtering = true
@@ -1140,13 +1153,22 @@ func (m model) updateLogKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "p":
 		return m.switchLogSource(-1)
 	case "t":
+		m.logGeneration++
 		m.log.tailing = !m.log.tailing
+		m.log.inFlight = false
 		if m.log.tailing {
-			return m, tea.Batch(loadLogCmd(m.client, m.currentLogTarget()), logTickCmd())
+			m.log.inFlight = true
+			return m, tea.Batch(
+				loadLogCmd(m.client, m.currentLogTarget(), m.logGeneration),
+				logTickCmd(m.logGeneration),
+			)
 		}
 	case "r":
-		m.log.loading = true
-		return m, loadLogCmd(m.client, m.currentLogTarget())
+		if m.log.inFlight {
+			return m, nil
+		}
+		m.log.inFlight = true
+		return m, loadLogCmd(m.client, m.currentLogTarget(), m.logGeneration)
 	case "g":
 		m.log.vp.GotoTop()
 	case "G":

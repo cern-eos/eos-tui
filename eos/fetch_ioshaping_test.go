@@ -1,8 +1,11 @@
 package eos
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestLooksUnsupported(t *testing.T) {
@@ -34,5 +37,18 @@ io disable [-r] [-p] [-n] [--udp <address>] : disable collection of io statistic
 				t.Fatalf("looksUnsupported = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIOShapingPressureReportsCLILibraryMismatch(t *testing.T) {
+	runner := &recordingRunner{
+		out: []byte("eos: symbol lookup error: eos: undefined symbol: _ZN3eos...\n"),
+		err: errors.New("exit status 127"),
+	}
+	client := &Client{timeout: time.Second, runner: runner}
+
+	_, err := client.IOShapingPressure(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "CLI/library mismatch") {
+		t.Fatalf("IOShapingPressure() error = %v, want library mismatch", err)
 	}
 }

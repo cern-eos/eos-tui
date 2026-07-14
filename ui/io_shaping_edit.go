@@ -375,11 +375,7 @@ func (m model) renderIOShapingPolicyEditPopup() string {
 		if m.ioShapingEdit.err != "" {
 			lines = append(lines, "", m.styles.error.Render(m.ioShapingEdit.err))
 		}
-		return m.styles.panel.
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("62")).
-			Padding(1, 2).
-			Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+		return m.renderModal(lines, lipgloss.Color("62"), 0)
 	}
 
 	title := "Edit IO Shaping Policy"
@@ -450,11 +446,7 @@ func (m model) renderIOShapingPolicyEditPopup() string {
 		lines = append(lines, "", m.styles.error.Render(m.ioShapingEdit.err))
 	}
 
-	return m.styles.panel.
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("62")).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return m.renderModal(lines, lipgloss.Color("62"), 0)
 }
 
 func parseIOShapingRate(raw string) (uint64, error) {

@@ -115,7 +115,7 @@ func TestIdleTimeoutQuitsOnTick(t *testing.T) {
 	}).(model)
 	m.lastActivity = time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
 
-	_, cmd := m.Update(tickMsg(m.lastActivity.Add(time.Minute)))
+	_, cmd := m.Update(idleTickMsg(m.lastActivity.Add(time.Minute)))
 	if cmd == nil {
 		t.Fatalf("expected idle timeout to quit")
 	}
@@ -1675,7 +1675,7 @@ func TestNamespaceStatsViewNavigationMovesSelection(t *testing.T) {
 	}
 }
 
-func TestNamespaceStatsViewCanFocusDetailAndPanHorizontally(t *testing.T) {
+func TestNamespaceStatsNarrowDetailUsesFullWidthAndCanFocusColumns(t *testing.T) {
 	m := NewModel(nil, "local eos cli", "/").(model)
 	m.width = 100
 	m.height = 28
@@ -1692,8 +1692,8 @@ func TestNamespaceStatsViewCanFocusDetailAndPanHorizontally(t *testing.T) {
 		},
 	}
 
-	if maxX := m.statsDetailMaxOffsetX(m.statsSections()); maxX == 0 {
-		t.Fatalf("expected layout section to require horizontal panning")
+	if maxX := m.statsDetailMaxOffsetX(m.statsSections()); maxX != 0 {
+		t.Fatalf("expected single-pane detail to avoid horizontal panning, got max offset %d", maxX)
 	}
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
@@ -4590,15 +4590,15 @@ func TestShellExitedMsgUpdatesStatus(t *testing.T) {
 	}
 }
 
-func TestFSConfigStatusResultMsgShowsAlertOnError(t *testing.T) {
+func TestFSConfigStatusResultMsgDoesNotCloseNewEditor(t *testing.T) {
 	m := NewModel(nil, "local eos cli", "/").(model)
 	m.fsEdit = fsConfigStatusEdit{active: true, fsID: 5}
 
-	updated, _ := m.Update(fsConfigStatusResultMsg{err: fmt.Errorf("permission denied")})
+	updated, _ := m.Update(fsConfigStatusResultMsg{fsID: 4, value: "ro", err: fmt.Errorf("permission denied")})
 	m = updated.(model)
 
-	if m.fsEdit.active {
-		t.Fatalf("expected fsEdit to be closed after result")
+	if !m.fsEdit.active || m.fsEdit.fsID != 5 {
+		t.Fatalf("expected a late result for fs 4 to leave the fs 5 editor open")
 	}
 	if !m.alert.active {
 		t.Fatalf("expected error alert to be shown on failure")
@@ -4775,7 +4775,7 @@ func TestCommandPanelStaysBottomAnchoredInGroupsView(t *testing.T) {
 	assertCommandPanelAnchored(t, m, view)
 }
 
-func TestCommandPanelStaysBottomAnchoredWithFSConfigPopup(t *testing.T) {
+func TestFSConfigPopupTemporarilyUsesCommandPanelRows(t *testing.T) {
 	m := NewModel(nil, "local eos cli", "/").(model)
 	m.width = 120
 	m.height = 30
@@ -4797,9 +4797,16 @@ func TestCommandPanelStaysBottomAnchoredWithFSConfigPopup(t *testing.T) {
 	}
 
 	view := m.View()
-	assertCommandPanelAnchored(t, m, view)
-	if !strings.Contains(view, "/data/01") {
-		t.Fatalf("expected filesystem mount path to remain visible with popup open, got:\n%s", view)
+	if strings.Contains(view, "Recent commands") {
+		t.Fatalf("expected blocking popup to suppress command panel, got:\n%s", view)
+	}
+	for _, needle := range []string{"/data/01", "Set configstatus", "enter apply", "╰", "╯"} {
+		if !strings.Contains(view, needle) {
+			t.Fatalf("expected filesystem popup view to contain %q, got:\n%s", needle, view)
+		}
+	}
+	if got := lineCount(view); got != m.height {
+		t.Fatalf("popup view rendered %d lines, want %d", got, m.height)
 	}
 }
 
@@ -6176,6 +6183,8 @@ func TestComputeClusterHealth(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := NewModel(nil, "test", "/").(model)
+			m.fstsLoading = false
+			m.fileSystemsLoading = false
 			m.fsts = tc.fsts
 			m.fileSystems = tc.fss
 			got := m.computeClusterHealth()
@@ -6183,6 +6192,21 @@ func TestComputeClusterHealth(t *testing.T) {
 				t.Errorf("computeClusterHealth() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestComputeClusterHealthDoesNotReportOKForIncompleteOrFailedData(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := NewModel(nil, "test", "/").(model)
+	m.fsts = []eos.FstRecord{{Status: "online"}}
+	if got := m.computeClusterHealth(); got != "CHECKING" {
+		t.Fatalf("health with filesystem data still loading = %q, want CHECKING", got)
+	}
+
+	m.fileSystemsLoading = false
+	m.fileSystemsErr = errors.New("filesystem query failed")
+	if got := m.computeClusterHealth(); got != "UNKNOWN" {
+		t.Fatalf("health with a failed component = %q, want UNKNOWN", got)
 	}
 }
 
@@ -6780,7 +6804,7 @@ func TestNamespaceMkdirEnterRunsCommand(t *testing.T) {
 	}
 }
 
-func TestNamespaceMkdirResultRefreshesDirectory(t *testing.T) {
+func TestNamespaceMkdirResultRefreshesDirectoryWithoutClosingNewPopup(t *testing.T) {
 	m := newSizedTestModel(t)
 	m.activeView = viewNamespace
 	m.directory = eos.Directory{Path: "/eos/test"}
@@ -6791,8 +6815,8 @@ func TestNamespaceMkdirResultRefreshesDirectory(t *testing.T) {
 	updated, cmd := m.Update(namespaceMkdirResultMsg{path: "/eos/test/new-dir"})
 	m = updated.(model)
 
-	if m.nsMkdir.active {
-		t.Fatalf("expected mkdir popup to be closed")
+	if !m.nsMkdir.active {
+		t.Fatalf("expected a late mkdir result to leave the newer popup open")
 	}
 	if !m.nsLoading {
 		t.Fatalf("expected namespace reload after mkdir")
@@ -7201,8 +7225,11 @@ func TestLogKeysRReloads(t *testing.T) {
 	}
 
 	m = sendKey(m, runeKey('r'))
-	if !m.log.loading {
-		t.Fatalf("expected log.loading=true after 'r'")
+	if !m.log.inFlight {
+		t.Fatalf("expected log.inFlight=true after 'r'")
+	}
+	if m.log.loading {
+		t.Fatalf("expected a reload to keep cached log content visible")
 	}
 }
 
@@ -8170,7 +8197,7 @@ func TestLoadLogCmdTreatsMissingFileAsNotice(t *testing.T) {
 		title:    "MGM Drain",
 		source:   missingPath,
 		filePath: missingPath,
-	})().(logLoadedMsg)
+	}, 1)().(logLoadedMsg)
 
 	if msg.err != nil {
 		t.Fatalf("expected missing log file to be a notice, got error %v", msg.err)

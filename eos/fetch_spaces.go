@@ -2,7 +2,6 @@ package eos
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -36,7 +35,7 @@ func (c *Client) Spaces(ctx context.Context) ([]SpaceRecord, error) {
 		} `json:"result"`
 	}
 
-	if err := json.Unmarshal(stripEOSPreamble(output), &payload); err != nil {
+	if err := unmarshalEOSJSON(output, &payload); err != nil {
 		return nil, fmt.Errorf("parse space ls: %w (output: %.200s)", err, output)
 	}
 
@@ -105,7 +104,7 @@ func parseSpaceStatusJSON(output []byte) ([]SpaceStatusRecord, error) {
 		Result []map[string]any `json:"result"`
 	}
 
-	if err := json.Unmarshal(stripEOSPreamble(output), &payload); err != nil {
+	if err := unmarshalEOSJSON(output, &payload); err != nil {
 		return nil, fmt.Errorf("parse space status json: %w", err)
 	}
 	if len(payload.Result) == 0 {
